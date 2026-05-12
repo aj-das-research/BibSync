@@ -1,0 +1,173 @@
+# BibSync
+
+Take a `.bib` file, replace every entry with its canonical version from
+Google Scholar, and keep your `\cite{}` calls in `.tex` files in sync —
+even when cite keys change. LLM-verified at every match to prevent the
+hallucination class of failures.
+
+## The one workflow
+
+```bash
+bibsync fix --bib references.bib --project .
+```
+
+For each entry in `references.bib`:
+
+1. **Search Google Scholar** by title.
+2. **Heuristic filter** — discard candidates whose first-author surname or
+   year disagree with your entry.
+3. **LLM-as-judge verifies identity** — for each remaining candidate, an LLM
+   call decides "is this the same paper?". Different first author, different
+   topic, or "derivative work" (chapter ABOUT vs. the original) → rejected.
+   Only matches with confidence ≥ 0.7 are accepted.
+4. **Fetch official BibTeX** from Scholar for the verified match.
+5. **Regenerate the cite key** from the corrected metadata
+   (`firstauthor + year + firsttitleword`). If your old entry had the year
+   wrong (`wang2019` → corrected to `wang2021`), the new key reflects it.
+6. **Propagate the rename** — every `\cite{wang2019}` in every `.tex` under
+   `--project` becomes `\cite{wang2021}`. The `.bib` and the prose stay in
+   sync, atomically.
+
+Entries that fail any step are reported as **`unverified`** and **left
+untouched**. The default stance is "never silently corrupt your data".
+
+## Why LLM verification is the safety net
+
+Google Scholar's title search is noisy. A query for `Attention is all you
+need` can return *"Is Attention All You Need?"* — a 2025 book chapter by a
+different author — as the top result. Pure heuristics (title fuzz, author
+fuzz) catch some of these, but not the close calls. The LLM judge is the
+final gate: given the original `.bib` entry and a candidate, it reasons
+about whether they're the *same paper* with rules like:
+
+* First-author surname agrees (allowing transliteration / abbreviation)
+* Title matches semantically (allowing case / punctuation drift)
+* Year within ±2 (preprint → proceedings drift is normal)
+* The candidate is not a derivative work (review, follow-up, chapter ABOUT)
+
+Each verdict is shown in the report:
+
+```
+mineault2025attention → unverified
+LLM verdict: conf=0.95 — "Different first author (Mineault vs Vaswani);
+                          a 2025 book chapter ABOUT the original."
+```
+
+## Install
+
+```bash
+git clone https://github.com/<you>/BibSync.git && cd BibSync
+python3 -m venv .venv && source .venv/bin/activate
+pip install -e ".[openai]"
+playwright install chromium       # one-time, ~150 MB
+```
+
+## OpenAI or OpenRouter API key
+
+`fix` requires an LLM key — match verification is what makes the pipeline
+safe. Provider is auto-detected from the key prefix:
+
+| Key prefix | Provider | Default model |
+|---|---|---|
+| `sk-or-...` | OpenRouter | `openai/gpt-4o-mini` |
+| `sk-...` | OpenAI | `gpt-4o-mini` |
+
+Set it once:
+
+```bash
+bibsync config set openrouter_key sk-or-v1-...
+# or
+bibsync config set openai_key sk-...
+
+bibsync config show     # prints redacted key + which provider was picked up
+```
+
+Resolution order: `OPENROUTER_API_KEY` / `OPENAI_API_KEY` env vars → `.env`
+file in cwd → config file at
+`~/Library/Application Support/bibsync/config.json` (macOS) or
+`~/.config/bibsync/config.json` (Linux). Config file is `chmod 600`.
+
+You can pick a stronger model (Claude, Gemini, GPT-4o) per command:
+
+```bash
+bibsync fix --bib refs.bib --project . --model anthropic/claude-3.5-sonnet
+```
+
+## Quick demo
+
+The bundled `examples/fix_demo/` has a `.bib` with intentional errors plus
+a `paper.tex` that cites those keys.
+
+```bash
+git checkout examples/         # reset to pristine state
+bibsync fix --bib examples/fix_demo/references.bib --project examples/fix_demo
+```
+
+After the run, `git diff examples/fix_demo/` shows exactly what changed in
+both the `.bib` and `paper.tex`.
+
+## CLI flags
+
+```bash
+bibsync fix --bib <file>          # required: the .bib to fix
+            --project <dir>       # optional: scan this dir for .tex files to update
+            --model <model_id>    # optional: override the LLM (e.g. anthropic/claude-3.5-sonnet)
+            --preserve-keys       # optional: keep original cite keys; do not regenerate
+            --headless            # optional: run Chrome headlessly (CAPTCHAs more likely)
+            --delay 1.5           # optional: seconds between Scholar lookups
+```
+
+## Browser opens visibly — why?
+
+Google Scholar aggressively CAPTCHAs headless browsers. BibSync uses a
+**persistent Chrome profile** (stored under your OS user data dir) so the
+first solved CAPTCHA carries over to subsequent runs. The window is
+visible by default; solve any CAPTCHA once and continue.
+
+`--headless` is supported but expect more frequent challenges.
+
+## Additional commands (less used)
+
+These exist for completeness; you typically only need `fix`:
+
+| Command | What it does |
+|---|---|
+| `bibsync add "<paper title>"` | Add a single paper by title. |
+| `bibsync verify --bib <file>` | Read-only audit; no rewrites. |
+| `bibsync scan <dir>` | Diagnostic — list missing/orphan cite keys. |
+| `bibsync search "<query>"` | Preview Scholar results without writing. |
+| `bibsync extract <paper.tex>` | Given LLM-drafted prose with `\cite{key}` placeholders, decode each key from context and populate the `.bib`. |
+| `bibsync repair <bibitems.tex>` | Convert legacy `\bibitem{...}` blocks to BibTeX. |
+| `bibsync suggest <paper.tex>` | Suggest citations for paragraphs that have none. Experimental — heuristic-only matching, no LLM verification yet, so accept suggestions with care. |
+
+## File layout
+
+```
+BibSync/
+├── bibsync/
+│   ├── cli.py          # Click subcommands
+│   ├── fix.py          # main pipeline: LLM-verified bib repair + .tex sync
+│   ├── llm.py          # OpenAI/OpenRouter client, prompts, verify_match agent
+│   ├── scholar.py      # Playwright scraper (persistent profile, CAPTCHA-aware)
+│   ├── picker.py       # Canonical-version selection
+│   ├── bibtex.py       # Parse / dedupe / derive_cite_key / atomic write
+│   ├── tex_rewrite.py  # Comment-aware \cite{} rename + insertion
+│   ├── scanner.py      # .tex citation parser + paragraph-context extraction
+│   ├── config.py       # API-key resolution chain
+│   ├── verify.py       # Read-only .bib audit (legacy)
+│   ├── extract.py      # \cite{placeholder} → LLM-decode → Scholar add (legacy)
+│   ├── repair.py       # \bibitem{} → BibTeX (legacy)
+│   ├── suggest.py      # prose → suggested citations (experimental)
+│   └── models.py       # PaperHit dataclass
+└── pyproject.toml
+```
+
+## Status
+
+Alpha. `fix` is the focus and is tested end-to-end with mocks for the
+adversarial cases (wrong-paper rejection by LLM, year-driven key
+rename + .tex propagation). Other commands work but are less load-bearing.
+
+## License
+
+MIT.
