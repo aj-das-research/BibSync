@@ -106,6 +106,44 @@ bibsync fix --bib examples/fix_demo/references.bib --project examples/fix_demo
 After the run, `git diff examples/fix_demo/` shows exactly what changed in
 both the `.bib` and `paper.tex`.
 
+## Run every command (against bundled examples)
+
+Each command has a self-contained fixture under `examples/`. Reset state with
+`git checkout examples/` before each run.
+
+```bash
+# 1. fix      — verify + rewrite .bib, propagate \cite renames to .tex
+bibsync fix --bib examples/fix_demo/references.bib --project examples/fix_demo
+
+# 2. extract  — decode placeholder \cite{key} keys, populate .bib from Scholar
+bibsync extract examples/extract_demo/intro.tex --bib examples/extract_demo/references.bib
+
+# 3. repair   — convert legacy \bibitem{} blocks into verified BibTeX
+bibsync repair examples/repair_demo/old_bibliography.tex --bib examples/repair_demo/repaired.bib
+
+# 4. suggest  — read prose, suggest + insert citations interactively
+bibsync suggest examples/suggest_demo/intro.tex --bib examples/suggest_demo/references.bib
+
+# 5. scan     — diagnose missing + orphan cite keys across a project (read-only)
+bibsync scan examples/scan_demo
+
+# 6. verify   — read-only audit of a .bib against Scholar
+bibsync verify --bib examples/fix_demo/references.bib
+
+# 7. search   — preview Scholar results for a title
+bibsync search "Attention Is All You Need"
+
+# 8. add      — add a single paper by title to a .bib
+bibsync add "BERT pre-training of deep bidirectional transformers" --bib /tmp/scratch.bib
+
+# 9. config   — manage stored API key + model
+bibsync config show
+bibsync config set llm_model anthropic/claude-3.5-sonnet
+```
+
+See [`examples/README.md`](examples/README.md) for a per-demo description
+of what each fixture contains and what output to expect.
+
 ## CLI flags
 
 ```bash

@@ -1,48 +1,76 @@
 # BibSync examples
 
-Four self-contained demos — one per workflow. Run from the project root.
+Self-contained demos — one per command. Run from the project root. Every demo
+modifies the files in its folder, so use `git checkout examples/` to reset
+between runs.
 
-> **Tip:** each demo modifies the files in its folder. To re-run a demo from
-> scratch, reset with `git checkout examples/`.
+```
+examples/
+├── fix_demo/         # bibsync fix       — verify + rewrite .bib + propagate \cite to .tex
+├── extract_demo/     # bibsync extract   — decode placeholder \cite{key} keys into a .bib
+├── repair_demo/      # bibsync repair    — convert \bibitem{} blocks into BibTeX
+├── suggest_demo/     # bibsync suggest   — read prose, suggest + insert citations
+├── scan_demo/        # bibsync scan      — diagnose missing + orphan cite keys
+└── (verify reuses fix_demo's .bib)
+```
 
 ---
 
-## 1. `suggest_demo/` — text → citations
+## 1. `fix_demo/` — the main workflow
 
-The starting state: a paragraph of prose with no citations.
+The starting state: a `references.bib` with intentional errors plus a
+`paper.tex` that cites all four keys.
+
+What's wrong in `references.bib`:
+
+| Key | What's wrong |
+|---|---|
+| `vaswani2017attention` | Year says `2016` (should be 2017). Journal `arXiv preprint` (should be NeurIPS, type `@inproceedings`). |
+| `he2016resnet` | Correct — should come back `unchanged`. |
+| `devlin2018bert` | Year `2018` is the arXiv date; venue is NAACL 2019. |
+| `goodfellow2014gan` | Correct — should come back `unchanged`. |
 
 ```bash
-bibsync suggest examples/suggest_demo/intro.tex \
-                --bib examples/suggest_demo/references.bib
+# Reset to pristine state first
+git checkout examples/
+
+# Run with LLM-verified match + .tex propagation
+bibsync fix --bib examples/fix_demo/references.bib --project examples/fix_demo
+
+# See what changed
+git diff examples/fix_demo/
 ```
 
-You'll be prompted (interactively) for each suggested citation. Accept the
-ones that look right. When you're done:
+The report shows the LLM's verdict per entry (`conf=0.98 — "Same paper: Vaswani 2017 NeurIPS"`).
+Wrong-paper Scholar hits (e.g. "Is Attention All You Need?" by Mineault 2025) are
+rejected by the LLM judge — those entries fall to `unverified` and stay untouched.
 
-* `references.bib` will contain BibTeX entries fetched from Google Scholar
-  for each accepted suggestion.
-* `intro.tex` will now contain `\cite{...}` calls inserted right after the
-  relevant phrases (e.g. `~\cite{moor2023foundation}` after `"vision in 2023"`).
+### Variant: preserve cite keys
 
-Use `--auto` to accept everything without prompting (not recommended for first runs).
+```bash
+bibsync fix --bib examples/fix_demo/references.bib \
+            --project examples/fix_demo \
+            --preserve-keys
+```
+
+Fields are still corrected, but the original cite keys are kept and the `.tex` is not modified.
 
 ---
 
 ## 2. `extract_demo/` — placeholder `\cite{}` keys → populated `.bib`
 
-The starting state: a paragraph that already has `\cite{}` calls with
-placeholder keys (no `.bib` entries yet — what you'd get from an LLM-drafted
-paper). The cite keys themselves carry hints (`moor2023gmai` = Moor 2023,
-topic acronym GMAI).
+The starting state: a paragraph with `\cite{}` calls referencing placeholder
+keys (no `.bib` entries yet — what an LLM-drafted paper looks like). The cite
+key itself encodes hints (`moor2023gmai` → Moor + 2023 + acronym "GMAI").
 
 ```bash
 bibsync extract examples/extract_demo/intro.tex \
                 --bib examples/extract_demo/references.bib
 ```
 
-BibSync decodes each key (using the surrounding prose as context), searches
-Scholar, fetches BibTeX, and writes it to the `.bib` — preserving your cite
-keys exactly as the `.tex` uses them.
+The LLM decodes each key using the surrounding prose, searches Scholar, fetches
+BibTeX, and writes it to the `.bib` — preserving your cite keys so the
+`.tex` keeps working.
 
 ---
 
@@ -56,50 +84,69 @@ bibsync repair examples/repair_demo/old_bibliography.tex \
                --bib examples/repair_demo/repaired.bib
 ```
 
-BibSync LLM-parses each `\bibitem{...}` block, cross-checks the parsed
-metadata against Google Scholar (catching the case where the original
-bibitem was itself hallucinated), and writes verified BibTeX to
-`repaired.bib`. Omit `--bib` to preview the output on stdout without
-writing anything.
+The LLM parses each block, cross-checks against Scholar, and writes verified
+BibTeX to `repaired.bib`. Omit `--bib` to preview the output on stdout.
 
 ---
 
-## 4. `fix_demo/` — verify `.bib`, propagate key renames
+## 4. `suggest_demo/` — text → suggested citations
 
-The starting state: a `references.bib` with **intentional errors**, plus a
-`paper.tex` that cites them.
-
-What's wrong in `references.bib`:
-
-| Key | What's wrong |
-|---|---|
-| `vaswani2017attention` | Year says `2016` (should be 2017). Journal says `arXiv preprint` (should be NeurIPS). |
-| `he2016resnet` | Correct — should come back `unchanged`. |
-| `devlin2018bert` | Year `2018` is the arXiv date; the venue is NAACL 2019. Journal type vs. inproceedings. |
-| `goodfellow2014gan` | Correct — should come back `unchanged`. |
-
-Run the verifier:
+The starting state: a paragraph of prose with **no** citations at all.
 
 ```bash
-bibsync fix --bib examples/fix_demo/references.bib \
-            --project examples/fix_demo
+bibsync suggest examples/suggest_demo/intro.tex \
+                --bib examples/suggest_demo/references.bib
 ```
 
-After the run:
-* `references.bib` has corrected year, venue, and entry-type fields.
-* `paper.tex` is untouched (no key changes happened).
+For each paragraph that has no `\cite{}`, the LLM identifies what should be
+cited (named methods like `Med-PaLM`, attributed claims, foundational
+works). Each suggestion is shown interactively — accept (`y`), reject (`n`),
+or quit (`q`). On accept, the entry is appended to the `.bib` and a
+`\cite{}` is inserted into the `.tex` at the anchor phrase.
 
-Now try the key-regeneration flag:
+> **Note:** `suggest` is experimental — it uses heuristic Scholar matching, not the
+> LLM-judge verification that `fix` uses, so accept suggestions critically and
+> follow up with `bibsync fix` to clean up any wrong matches.
+
+---
+
+## 5. `scan_demo/` — diagnose missing + orphan cite keys (read-only)
+
+The starting state: a `paper.tex` that cites four keys (two of them are made
+up — likely hallucinated by an LLM) and a `references.bib` that defines four
+keys (two of them are never cited).
 
 ```bash
-bibsync fix --bib examples/fix_demo/references.bib \
-            --project examples/fix_demo \
-            --regenerate-keys
+bibsync scan examples/scan_demo
 ```
 
-This rebuilds every cite key from `firstauthor + year + firsttitleword`
-(e.g., `vaswani2017attention` → same, but `devlin2018bert` may become
-`devlin2019bert`). Every `\cite{...}` in `paper.tex` is rewritten to match.
+Expected output:
+
+```
+Missing (cited but not defined in any .bib — possible hallucinations):
+  • another_missing_2023
+  • ghost_paper_2024
+
+Orphan entries (defined in .bib but never cited):
+  • another_orphan
+  • unused_orphan_entry
+```
+
+The `\cite{commented_out_paper}` inside a LaTeX comment is correctly ignored.
+
+---
+
+## 6. Verify (read-only audit, no new fixture)
+
+`verify` reads the same input shape as `fix` but only **reports** discrepancies —
+it never modifies files. Use it for a dry-run before running `fix`:
+
+```bash
+bibsync verify --bib examples/fix_demo/references.bib
+```
+
+You'll see a table listing year/venue/author mismatches per entry, with no
+changes to disk.
 
 ---
 
@@ -108,3 +155,5 @@ This rebuilds every cite key from `firstauthor + year + firsttitleword`
 ```bash
 git checkout examples/
 ```
+
+This restores every demo to its pristine starting state so you can re-run.
