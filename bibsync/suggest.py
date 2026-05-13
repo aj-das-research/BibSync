@@ -32,6 +32,39 @@ CLAIM_SUPPORT_CONFIDENCE_FLOOR = 0.7
 _PARA_BOUNDARY = re.compile(r"\n\s*\n")
 _CITE_PRESENCE_RE = re.compile(r"\\(?:no)?cite\w*\s*(?:\[[^\]]*\])*\s*\{")
 
+# Pattern matches "Name <version-token>" in a claim. Name is a hyphenated or
+# camel-case word starting with a capital. Version token is digits, a lone
+# capital letter (M / N / X), or a small set of version words (v2, Pro, Plus).
+_VERSIONED_NAME_RE = re.compile(
+    r"\b([A-Z][A-Za-z]+(?:[-][A-Za-z]+)*)\s+(\d+(?:\.\d+)?|[A-Z](?=\b)|v\d+|Pro|Plus)\b"
+)
+
+
+def _version_mismatch(claim: str, candidate_title: str) -> Optional[str]:
+    """Return a rejection reason if the claim names a versioned system but the
+    candidate title contains only the base (unversioned) name.
+
+    Catches the gpt-4o-mini blind spot where "Med-PaLM 2" got matched to the original
+    "Med-PaLM" paper. The candidate must contain ``<Name>[\\s\\-]<Version>`` together;
+    presence of only ``<Name>`` is treated as a different paper (almost always the
+    earlier version).
+    """
+    for m in _VERSIONED_NAME_RE.finditer(claim):
+        name = m.group(1)
+        version = m.group(2)
+        cand = candidate_title.lower()
+        name_re = re.escape(name.lower())
+        ver_re = re.escape(version.lower())
+        if re.search(rf"\b{name_re}[\s\-]*{ver_re}\b", cand):
+            continue  # candidate contains the versioned form — fine
+        if re.search(rf"\b{name_re}\b", cand):
+            return (
+                f"claim names {name!r} {version!r}, but candidate title contains "
+                f"only base {name!r} — different version, almost certainly the "
+                f"prior paper"
+            )
+    return None
+
 
 @dataclass
 class SuggestionResult:
@@ -79,6 +112,7 @@ async def _resolve_suggestion(
     headless: bool,
     model: Optional[str],
     api_key: Optional[str],
+    used_cluster_ids: Optional[set] = None,
 ) -> tuple[SuggestionResult, Optional[dict]]:
     """Agentic pipeline for one suggested citation:
 
@@ -151,11 +185,48 @@ async def _resolve_suggestion(
             cited=c.cited_by,
         )
 
-    # Step 3: LLM judges each top candidate against the claim.
+    # Step 3: for each top candidate, apply two cheap deterministic filters first
+    # (version mismatch, cluster-id reuse), then ask the LLM-as-judge.
     accepted: Optional[PaperHit] = None
     last_reason = ""
     last_confidence = 0.0
+    used = used_cluster_ids if used_cluster_ids is not None else set()
     for i, candidate in enumerate(candidates[:MAX_CANDIDATES_PER_CLAIM]):
+        # Filter A — deterministic version-mismatch check.
+        # Catches "Med-PaLM 2" → "Med-PaLM" (gpt-4o-mini's blind spot).
+        mismatch = _version_mismatch(suggestion.anchor, candidate.title)
+        if mismatch:
+            dbg.trace(
+                "suggest.version_check",
+                "REJECT",
+                candidate_idx=i + 1,
+                title=candidate.title,
+                reason=mismatch,
+            )
+            last_reason = f"version mismatch: {mismatch}"
+            last_confidence = 1.0  # deterministic, certain
+            continue
+
+        # Filter B — cluster-id deduplication.
+        # If a previous suggestion in this run already cited this exact Scholar
+        # cluster, picking it again means we have the wrong paper for *this* claim.
+        if candidate.cluster_id and candidate.cluster_id in used:
+            dbg.trace(
+                "suggest.dedupe",
+                "REJECT",
+                candidate_idx=i + 1,
+                title=candidate.title,
+                cluster=candidate.cluster_id,
+                reason="cluster already used by an earlier accepted citation in this run",
+            )
+            last_reason = (
+                "candidate cluster already used by an earlier citation in this run — "
+                "this would create a duplicate"
+            )
+            last_confidence = 1.0
+            continue
+
+        # Filter C — LLM-as-judge.
         verdict = llm.verify_claim_support(
             claim_text=suggestion.anchor,
             context=paragraph,
@@ -167,12 +238,15 @@ async def _resolve_suggestion(
         last_confidence = verdict.confidence
         if verdict.supports and verdict.confidence >= CLAIM_SUPPORT_CONFIDENCE_FLOOR:
             accepted = candidate
+            if candidate.cluster_id:
+                used.add(candidate.cluster_id)
             dbg.trace(
                 "suggest.verify",
                 "ACCEPTED",
                 candidate_idx=i + 1,
                 conf=round(verdict.confidence, 2),
                 title=candidate.title,
+                cluster=candidate.cluster_id,
             )
             break
         dbg.trace(
@@ -249,6 +323,14 @@ async def suggest_for_file(
         paragraphs=len(paragraphs),
     )
 
+    # Track which Scholar cluster_ids we've already cited in THIS run. If two
+    # different anchors both resolve to the same paper, the second is almost
+    # certainly the wrong match (since we already wrote it for the first claim).
+    used_cluster_ids: set[str] = set()
+    # Pre-seed with cluster IDs we can already infer from existing .bib entries
+    # (so a re-run doesn't duplicate-cite). We can't fully recover cluster_id from
+    # a stored entry, so this is best-effort — handled at append time below.
+
     # Pool all Scholar calls in this run into ONE browser context.
     async with scholar.shared_session(headless=headless):
         for p_idx, paragraph in enumerate(paragraphs):
@@ -290,6 +372,7 @@ async def suggest_for_file(
                 r, entry = await _resolve_suggestion(
                     sugg, paragraph, p_idx,
                     headless=headless, model=model, api_key=api_key,
+                    used_cluster_ids=used_cluster_ids,
                 )
 
                 if entry is None:

@@ -621,11 +621,27 @@ ACCEPT (supports=true) when ANY of these hold (each is sufficient on its own):
 
 REJECT (supports=false) when ANY of these hold:
 
-  X. The CANDIDATE is an EXPLICIT VERSION VARIANT. If the claim names "MedSAM" and
-     the CANDIDATE title is "Medical SAM 2", "MedSAM 2", "MedSAM v2", or similar
-     "X 2" / "X+" — REJECT. A sequel is a different paper. Same goes for
-     "BERT" vs "RoBERTa", "GPT" vs "GPT-2", etc. UNLESS the claim explicitly
-     references the variant.
+  X. The CANDIDATE TITLE contains an EXPLICIT CONFLICTING VERSION of the system in
+     the claim. Concretely: this rule fires ONLY when the candidate title literally
+     mentions the system name followed by a version that DIFFERS from the claim.
+
+     RULE X fires (REJECT):
+       - claim "MedSAM" + candidate "Medical SAM 2" / "MedSAM 2" / "MedSAM v2"
+       - claim "GPT-3" + candidate "GPT-2: ..." / "GPT-4 Technical Report"
+       - claim "BERT" + candidate "RoBERTa: A Robustly Optimized BERT ..."
+
+     RULE X DOES NOT FIRE (don't reject just on this — assess via A/B/C instead):
+       - claim "MedSAM" + candidate "Segment Anything in Medical Images"
+         (title doesn't mention any MedSAM version; could still BE the MedSAM paper
+         — many canonical papers don't put the system name in the title; check A/B)
+       - claim "Med-Gemini" + candidate "Capabilities of gemini models in medicine"
+         (no conflicting version; topic + cited_by are the right signals)
+       - claim "GPT-3" + candidate "Language Models are Few-Shot Learners"
+         (no version conflict in title — this is the GPT-3 paper)
+
+     KEY MENTAL TEST: if the candidate title doesn't mention any version number at
+     all, you CANNOT reject on rule X — pivot to A (introduces the system) or
+     B (high cited_by + topic match).
 
   Y. The CANDIDATE is a SURVEY, REVIEW, retrospective, comprehensive overview, or
      book chapter, AND there is no indication this is the ORIGINAL work.
