@@ -16,6 +16,7 @@ so the user can resolve them manually.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -24,6 +25,23 @@ from . import bibtex, llm, picker, scanner, scholar
 from .models import PaperHit
 
 DEFAULT_CONFIDENCE_FLOOR = 0.6
+
+
+def _parse_cite_key(cite_key: str) -> dict:
+    """Decode the surname + year embedded in citation keys like ``moor2023gmai``.
+
+    Cite keys carry authoritative metadata that the LLM can't override. ``moor`` is
+    definitively the first author, ``2023`` is the year — regardless of what the LLM
+    later infers about the paper's content. We feed these as hard constraints to the
+    verifier so a Scholar hit by ``Di 2024`` cannot be accepted for ``moor2023gmai``.
+    """
+    out: dict = {}
+    m = re.match(r"^([a-zA-Z]+)(\d{4})", cite_key)
+    if not m:
+        return out
+    out["surname"] = m.group(1).lower()
+    out["year"] = int(m.group(2))
+    return out
 
 
 @dataclass
@@ -116,12 +134,22 @@ async def _resolve_one(
     result.scholar_hit = canonical
 
     # LLM-as-judge: verify Scholar's pick really is the paper the LLM inferred from
-    # the cite key. Catches the "Will generalist medical AI..." vs "Foundation models
-    # for generalist medical AI" class of wrong-paper matches.
+    # the cite key. Cite-key components are authoritative (more reliable than LLM
+    # inference) — surname/year extracted from the key override anything the LLM
+    # suggested. This catches the "Moor → Di" wrong-paper class.
+    key_constraints = _parse_cite_key(cite_key)
+    expected_author = (
+        key_constraints.get("surname") or inferred.first_author or ""
+    )
+    expected_year = (
+        str(key_constraints["year"])
+        if "year" in key_constraints
+        else (str(inferred.year) if inferred.year else "")
+    )
     expected = {
         "title": inferred.title,
-        "author": inferred.first_author or "",
-        "year": str(inferred.year) if inferred.year else "",
+        "author": expected_author,
+        "year": expected_year,
     }
     # Try the top few candidates rather than only the heuristic-canonical one — Scholar's
     # ranking sometimes puts the real paper second/third.
@@ -178,7 +206,7 @@ async def extract_from_file(
     confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
     openai_model: str = "gpt-4o-mini",
     api_key: Optional[str] = None,
-    delay_seconds: float = 1.5,
+    delay_seconds: float = 3.0,
 ) -> ExtractReport:
     """Resolve every `\\cite{}` key in ``tex_file`` and append to ``bib_file``.
 
@@ -196,6 +224,7 @@ async def extract_from_file(
     resolved_entries: list[tuple[ExtractResult, dict]] = []
 
     # Pool all Scholar calls for this run into a single browser context.
+    soft_block_warned = False
     async with scholar.shared_session(headless=headless):
         for i, (cite_key, use) in enumerate(keys_with_context.items()):
             if only_missing and cite_key in existing_keys:
@@ -219,6 +248,15 @@ async def extract_from_file(
                 entry["ID"] = cite_key
                 resolved_entries.append((r, entry))
             report.results.append(r)
+
+            if not soft_block_warned and scholar.consecutive_empty_count() >= 3:
+                print(
+                    "\n[bibsync] Detected 3+ consecutive empty Scholar responses — "
+                    "your IP/profile is almost certainly soft-blocked by Google Scholar.\n"
+                    "[bibsync] Fix: run `bibsync config reset-profile` and re-run, "
+                    "or wait ~30 minutes for the rate-limit window to clear.\n"
+                )
+                soft_block_warned = True
 
             if i < len(keys_with_context) - 1:
                 await asyncio.sleep(delay_seconds)

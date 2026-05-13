@@ -217,7 +217,7 @@ async def repair_file(
     headless: bool = False,
     openai_model: str = "gpt-4o-mini",
     api_key: Optional[str] = None,
-    delay_seconds: float = 1.5,
+    delay_seconds: float = 3.0,
 ) -> RepairReport:
     """Repair every `\\bibitem{...}` in ``source``. Optionally append/merge results into
     ``bib_output``."""

@@ -87,10 +87,12 @@ async def shared_session(headless: bool = False) -> AsyncIterator:
     """
     async with _browser(headless=headless) as ctx:
         token = _SHARED_CTX.set(ctx)
+        empty_token = _CONSECUTIVE_EMPTY_COUNT.set(0)
         try:
             yield ctx
         finally:
             _SHARED_CTX.reset(token)
+            _CONSECUTIVE_EMPTY_COUNT.reset(empty_token)
 
 
 @asynccontextmanager
@@ -212,18 +214,32 @@ def _diagnose_empty_result(html: str, query: str) -> str:
     """When the result parser returns [], inspect the HTML to figure out *why*."""
     low = html.lower()
     if "did not match any articles" in low:
-        return "Scholar reports no matching articles."
+        return f"Scholar reports no matching articles for {query!r}."
     if any(m in low for m in ("captcha", "unusual traffic", "/sorry/", "recaptcha")):
         return (
             "Scholar is showing a CAPTCHA / bot-check page. Solve it in the browser "
-            "window and re-run, or `bibsync config` then wipe the profile if it persists."
+            "window and re-run, or run `bibsync config reset-profile` if it persists."
         )
     if "gs_r" not in low:
         return (
-            "Scholar returned HTML but no expected result containers — your IP may be "
-            "rate-limited or the page layout changed. Try again in a few minutes."
+            f"Empty result for {query!r}. Scholar returned a page but no result "
+            "containers — this is a SOFT BLOCK (your IP/profile is rate-limited). "
+            "Fix: run `bibsync config reset-profile` and try again, or wait ~30 min."
         )
-    return f"Empty result for {query!r} (no obvious blocker detected)."
+    return f"Empty result for {query!r} (parser found result containers but extracted 0 hits — Scholar may have changed its HTML)."
+
+
+# Module-level counter for consecutive empty results within a single run. Reset by
+# shared_session(); incremented by search() on empty results. A run that hits N empties
+# in a row almost certainly means a soft block — the caller can surface a clear message.
+_CONSECUTIVE_EMPTY_COUNT: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "bibsync_consecutive_empty_count", default=0
+)
+
+
+def consecutive_empty_count() -> int:
+    """Return how many consecutive search() calls returned empty in this run."""
+    return _CONSECUTIVE_EMPTY_COUNT.get()
 
 
 async def search(query: str, *, headless: bool = False, max_results: int = 10) -> list[PaperHit]:
@@ -239,6 +255,9 @@ async def search(query: str, *, headless: bool = False, max_results: int = 10) -
             if not hits:
                 # One-line diagnostic so the user knows what kind of empty this is.
                 print(f"[bibsync] {_diagnose_empty_result(html, query)}")
+                _CONSECUTIVE_EMPTY_COUNT.set(_CONSECUTIVE_EMPTY_COUNT.get() + 1)
+            else:
+                _CONSECUTIVE_EMPTY_COUNT.set(0)
             return hits
         finally:
             await page.close()

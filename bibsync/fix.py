@@ -362,7 +362,7 @@ async def fix_bib(
     regenerate_keys: bool = True,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
-    delay_seconds: float = 1.5,
+    delay_seconds: float = 3.0,
 ) -> FixReport:
     """Verify and rewrite each entry in ``bib_file``.
 
@@ -389,6 +389,7 @@ async def fix_bib(
 
     # Pool all Scholar calls for this run into a single browser context so we don't
     # trigger Scholar's anti-bot heuristics on the 8th-12th launch.
+    soft_block_warned = False
     async with scholar.shared_session(headless=headless):
         for i, entry in enumerate(db.entries):
             result, merged = await _fix_one(
@@ -401,6 +402,19 @@ async def fix_bib(
             )
             report.results.append(result)
             new_entries.append(merged if merged is not None else entry)
+
+            # If we see 3 consecutive empty Scholar responses, the IP/profile is almost
+            # certainly soft-blocked. Print a one-time warning and keep going (so the user
+            # can see the full unverified report rather than aborting mid-way).
+            if not soft_block_warned and scholar.consecutive_empty_count() >= 3:
+                print(
+                    "\n[bibsync] Detected 3+ consecutive empty Scholar responses — "
+                    "your IP/profile is almost certainly soft-blocked by Google Scholar.\n"
+                    "[bibsync] Fix: run `bibsync config reset-profile` and re-run, "
+                    "or wait ~30 minutes for the rate-limit window to clear.\n"
+                )
+                soft_block_warned = True
+
             if i < len(db.entries) - 1:
                 await asyncio.sleep(delay_seconds)
 
