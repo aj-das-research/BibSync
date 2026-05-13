@@ -256,10 +256,18 @@ def suggest_cmd(
         sys.exit(2)
     console.print(f"[dim]Using {llm_cfg.provider} ({llm_cfg.model})[/dim]")
 
+    # Closure counter so the user can see "this is suggestion #N" — much less
+    # disorienting than seeing the same Paragraph 1 header for every Med-PaLM-ish
+    # anchor in a row.
+    suggestion_n = [0]
+
     def approve(result, entry: dict) -> bool:
+        suggestion_n[0] += 1
         scholar_hit = result.scholar_hit
         console.print()
-        console.print(f"[bold]Paragraph {result.paragraph_index}:[/bold] {result.paragraph_preview}")
+        console.print(
+            f"[bold]Suggestion #{suggestion_n[0]} · Paragraph {result.paragraph_index}[/bold]"
+        )
         console.print(f"  [cyan]Anchor:[/cyan] {result.anchor!r}")
         console.print(f"  [cyan]Query:[/cyan]  {result.query}")
         console.print(f"  [cyan]Reason:[/cyan] {result.reason}")

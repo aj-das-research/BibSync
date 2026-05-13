@@ -180,11 +180,26 @@ async def _resolve_suggestion(
         para=paragraph_idx,
     )
 
-    # Step 1: run each query, merge results, dedupe by cluster_id.
-    # Always run every query — Q1 often returns derivatives; Q2/Q3 (with author or
-    # title-keywords) is frequently the one that surfaces the canonical paper.
-    # Early-break by candidate count was hiding the better queries from the pipeline.
+    # Pipeline shape (query-by-query early exit):
+    #
+    #   for each query (canonical first, then LLM-proposed):
+    #     1. run Scholar search; merge new candidates by cluster_id
+    #     2. sort the WHOLE pool so far by cited_by DESC
+    #     3. for each top candidate not yet evaluated:
+    #          a. cheap deterministic filters (version mismatch, dedup)
+    #          b. LLM-as-judge claim support
+    #          c. if accepted → STOP (don't run more queries)
+    #
+    # This is dramatically faster than run-all-queries-then-judge: when query #1
+    # already returns the canonical paper (the common case), we issue exactly one
+    # Scholar search and one LLM call before moving on.
     merged: dict[str, PaperHit] = {}
+    evaluated: set[str] = set()  # cluster IDs we've already LLM-judged or filtered
+    accepted: Optional[PaperHit] = None
+    last_reason = ""
+    last_confidence = 0.0
+    used = used_cluster_ids if used_cluster_ids is not None else set()
+
     for q_idx, query in enumerate(all_queries[:MAX_QUERIES_PER_CLAIM]):
         dbg.trace("suggest.query", f"attempt #{q_idx + 1}", query=query)
         try:
@@ -192,15 +207,105 @@ async def _resolve_suggestion(
         except Exception as e:
             dbg.trace("suggest.query", "ERR", error=str(e))
             continue
-        dbg.trace("suggest.query", f"got {len(hits)} hits")
         new = 0
         for h in hits:
             if h.cluster_id and h.cluster_id not in merged:
                 merged[h.cluster_id] = h
                 new += 1
-        dbg.trace("suggest.query", "merged", new_candidates=new, total=len(merged))
+        dbg.trace(
+            "suggest.query",
+            f"got {len(hits)} hits",
+            new_candidates=new,
+            total_pool=len(merged),
+        )
 
-    if not merged:
+        if not merged:
+            continue
+
+        # Sort the whole pool so far by cited_by — canonical papers (typically
+        # 1000+ cites) rise to the top across all queries' results.
+        sorted_pool = sorted(merged.values(), key=lambda h: (h.cited_by or 0), reverse=True)
+
+        # Walk the top candidates we haven't yet evaluated.
+        for cand_i, candidate in enumerate(sorted_pool[:MAX_CANDIDATES_PER_CLAIM]):
+            if candidate.cluster_id in evaluated:
+                continue
+
+            # Filter A — deterministic version-mismatch check (catches Med-PaLM 2 → Med-PaLM).
+            mismatch = _version_mismatch(suggestion.anchor, candidate.title)
+            if mismatch:
+                dbg.trace(
+                    "suggest.version_check",
+                    "REJECT",
+                    candidate_idx=cand_i + 1,
+                    title=candidate.title,
+                    reason=mismatch,
+                )
+                last_reason = f"version mismatch: {mismatch}"
+                last_confidence = 1.0
+                evaluated.add(candidate.cluster_id)
+                continue
+
+            # Filter B — cluster-id dedup (catches "same paper cited for two claims").
+            if candidate.cluster_id and candidate.cluster_id in used:
+                dbg.trace(
+                    "suggest.dedupe",
+                    "REJECT",
+                    candidate_idx=cand_i + 1,
+                    title=candidate.title,
+                    cluster=candidate.cluster_id,
+                )
+                last_reason = (
+                    "candidate cluster already used by an earlier citation — "
+                    "would create a duplicate"
+                )
+                last_confidence = 1.0
+                evaluated.add(candidate.cluster_id)
+                continue
+
+            # Filter C — LLM-as-judge.
+            verdict = llm.verify_claim_support(
+                claim_text=suggestion.anchor,
+                context=paragraph,
+                candidate=candidate,
+                model=model,
+                api_key=api_key,
+            )
+            evaluated.add(candidate.cluster_id)
+            last_reason = verdict.reasoning
+            last_confidence = verdict.confidence
+            if verdict.supports and verdict.confidence >= CLAIM_SUPPORT_CONFIDENCE_FLOOR:
+                accepted = candidate
+                if candidate.cluster_id:
+                    used.add(candidate.cluster_id)
+                dbg.trace(
+                    "suggest.verify",
+                    "ACCEPTED",
+                    after_query=q_idx + 1,
+                    candidate_idx=cand_i + 1,
+                    conf=round(verdict.confidence, 2),
+                    title=candidate.title,
+                    cluster=candidate.cluster_id,
+                )
+                break
+            dbg.trace(
+                "suggest.verify",
+                f"rejected (after q{q_idx + 1}, cand{cand_i + 1})",
+                conf=round(verdict.confidence, 2),
+                reason=verdict.reasoning,
+            )
+
+        if accepted is not None:
+            # Stop — no need to run the remaining queries.
+            dbg.trace(
+                "suggest.resolve",
+                "early-exit",
+                queries_used=q_idx + 1,
+                queries_skipped=max(0, min(len(all_queries), MAX_QUERIES_PER_CLAIM) - (q_idx + 1)),
+            )
+            break
+
+    if accepted is None and not merged:
         result.status = "no_scholar_hit"
         result.note = (
             f"no Scholar results across {min(len(all_queries), MAX_QUERIES_PER_CLAIM)} "
@@ -209,99 +314,16 @@ async def _resolve_suggestion(
         dbg.trace("suggest.resolve", "no candidates from any query")
         return result, None
 
-    # Step 2: sort by cited_by DESC. Original foundational papers crush derivatives
-    # in citation count, so the most-cited heuristically-plausible candidate is the
-    # one to ask the LLM about first.
-    candidates = sorted(merged.values(), key=lambda h: (h.cited_by or 0), reverse=True)
-    dbg.trace("suggest.merge", f"{len(candidates)} unique candidates after dedupe")
-    for i, c in enumerate(candidates[:MAX_CANDIDATES_PER_CLAIM]):
-        dbg.trace(
-            "suggest.candidate",
-            f"#{i+1}",
-            title=c.title,
-            authors=(c.authors[0] if c.authors else ""),
-            year=c.year,
-            cited=c.cited_by,
-        )
-
-    # Step 3: for each top candidate, apply two cheap deterministic filters first
-    # (version mismatch, cluster-id reuse), then ask the LLM-as-judge.
-    accepted: Optional[PaperHit] = None
-    last_reason = ""
-    last_confidence = 0.0
-    used = used_cluster_ids if used_cluster_ids is not None else set()
-    for i, candidate in enumerate(candidates[:MAX_CANDIDATES_PER_CLAIM]):
-        # Filter A — deterministic version-mismatch check.
-        # Catches "Med-PaLM 2" → "Med-PaLM" (gpt-4o-mini's blind spot).
-        mismatch = _version_mismatch(suggestion.anchor, candidate.title)
-        if mismatch:
-            dbg.trace(
-                "suggest.version_check",
-                "REJECT",
-                candidate_idx=i + 1,
-                title=candidate.title,
-                reason=mismatch,
-            )
-            last_reason = f"version mismatch: {mismatch}"
-            last_confidence = 1.0  # deterministic, certain
-            continue
-
-        # Filter B — cluster-id deduplication.
-        # If a previous suggestion in this run already cited this exact Scholar
-        # cluster, picking it again means we have the wrong paper for *this* claim.
-        if candidate.cluster_id and candidate.cluster_id in used:
-            dbg.trace(
-                "suggest.dedupe",
-                "REJECT",
-                candidate_idx=i + 1,
-                title=candidate.title,
-                cluster=candidate.cluster_id,
-                reason="cluster already used by an earlier accepted citation in this run",
-            )
-            last_reason = (
-                "candidate cluster already used by an earlier citation in this run — "
-                "this would create a duplicate"
-            )
-            last_confidence = 1.0
-            continue
-
-        # Filter C — LLM-as-judge.
-        verdict = llm.verify_claim_support(
-            claim_text=suggestion.anchor,
-            context=paragraph,
-            candidate=candidate,
-            model=model,
-            api_key=api_key,
-        )
-        last_reason = verdict.reasoning
-        last_confidence = verdict.confidence
-        if verdict.supports and verdict.confidence >= CLAIM_SUPPORT_CONFIDENCE_FLOOR:
-            accepted = candidate
-            if candidate.cluster_id:
-                used.add(candidate.cluster_id)
-            dbg.trace(
-                "suggest.verify",
-                "ACCEPTED",
-                candidate_idx=i + 1,
-                conf=round(verdict.confidence, 2),
-                title=candidate.title,
-                cluster=candidate.cluster_id,
-            )
-            break
-        dbg.trace(
-            "suggest.verify",
-            f"rejected #{i+1}",
-            conf=round(verdict.confidence, 2),
-            reason=verdict.reasoning,
-        )
-
     if accepted is None:
+        # Build a single-pass sorted view for the report's "top candidate" surface.
+        sorted_pool = sorted(merged.values(), key=lambda h: (h.cited_by or 0), reverse=True)
         result.status = "no_supporting_match"
         result.note = (
-            f"LLM rejected all {min(len(candidates), MAX_CANDIDATES_PER_CLAIM)} "
+            f"LLM rejected all {min(len(sorted_pool), MAX_CANDIDATES_PER_CLAIM)} "
             f"top candidate(s) — last reason: {last_reason}"
         )
-        result.scholar_hit = candidates[0]
+        if sorted_pool:
+            result.scholar_hit = sorted_pool[0]
         return result, None
 
     result.scholar_hit = accepted
