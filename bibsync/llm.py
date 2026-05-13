@@ -53,13 +53,25 @@ class MatchVerification:
 
 @dataclass
 class CitationSuggestion:
-    """One paper that should be cited in a paragraph of prose."""
+    """One claim in the prose that should be cited, plus search angles to find the paper.
 
-    query: str  # Google Scholar search query (paper title or "first-author year topic")
+    ``queries`` holds 2-3 alternative Google Scholar searches: usually one specific
+    (title-like) and one or two broader (topic / author + year / system name).
+    Searching multiple queries and merging candidates dramatically improves recall
+    when Scholar's relevance ranking doesn't surface the canonical paper for the
+    most obvious query.
+    """
+
+    queries: list[str]  # 2-3 Google Scholar search queries (most-specific first)
     anchor: str  # verbatim substring of the paragraph to insert \cite{} after
     reason: str  # one sentence: why this needs citation
     expected_first_author: Optional[str] = None
     expected_year: Optional[int] = None
+
+    @property
+    def query(self) -> str:
+        """Back-compat: the first (most-specific) query."""
+        return self.queries[0] if self.queries else ""
 
 
 @dataclass
@@ -205,28 +217,37 @@ def infer_paper_from_cite_key(
 
 _SUGGEST_SYSTEM = """\
 You are an academic citation assistant. The user has a paragraph of LaTeX prose with
-NO citations yet. Your job is to identify factual claims, named methods, named systems,
-or attributions that should be cited, and propose what to cite.
+NO citations yet. Your job is to identify each factual claim, named method, named
+system, or attribution that should be cited, and propose 2-3 Google Scholar search
+queries for each — most-specific to broadest — so the caller can find the canonical
+paper even when Scholar's relevance ranking is noisy.
 
 Respond with a single JSON object of the form:
   {"suggestions": [
       {
-        "query": "Google Scholar search query (paper title, or '<first author> <year> <topic>')",
-        "anchor": "verbatim substring (5-20 words) from the input paragraph that the citation should be inserted RIGHT AFTER; must be an exact substring of the input",
-        "reason": "one sentence explaining why this needs a citation",
-        "expected_first_author": "optional surname guess (or null)",
+        "queries": [
+          "specific paper-title-like query (best for exact-paper search)",
+          "second query: e.g. '<first author surname> <year> <system name>'",
+          "third query: broader topic phrasing (fallback)"
+        ],
+        "anchor": "verbatim substring (5-20 words) from the input paragraph; \\cite{} will be inserted RIGHT AFTER this substring. Must be an exact substring.",
+        "reason": "one sentence explaining why this attribution needs a citation",
+        "expected_first_author": "surname guess if you have one, else null",
         "expected_year": 2023
       },
       ...
   ]}
 
 Rules:
-  * Only flag genuine attributions (named methods like "Med-PaLM", specific systems
-    like "RETFound", quantitative claims, foundational works). Do NOT cite generic
-    methodology phrases like "we propose" or "we evaluate".
-  * If the paragraph names multiple distinct systems / methods, propose ONE citation per
-    distinct system. The anchor can be the system name itself if it's the natural place
-    for the citation in LaTeX style (e.g., anchor="Med-PaLM 2").
+  * Only flag GENUINE attributions: named methods ("Med-PaLM", "RETFound"), specific
+    systems, quantitative claims, foundational works, or named results. Do NOT cite
+    generic methodology phrases like "we propose" or "we evaluate".
+  * One citation per distinct system/claim. Multiple systems named in one sentence
+    each get their own suggestion.
+  * For ``queries``, provide 2-3 angles. Examples for a Med-PaLM 2 claim:
+      ["Med-PaLM 2 large language model medicine",
+       "Singhal Med-PaLM 2 Google",
+       "Med-PaLM 2 USMLE expert-level"]
   * If the paragraph has NO claims needing citation, return JSON {"suggestions": []}.
 """
 
@@ -259,9 +280,15 @@ def suggest_citations(
     for s in data.get("suggestions") or []:
         if not isinstance(s, dict):
             continue
-        query = (s.get("query") or "").strip()
+        # Prefer ``queries`` (list) — fall back to a single ``query`` for back-compat.
+        raw_queries = s.get("queries")
+        if isinstance(raw_queries, list):
+            queries = [str(q).strip() for q in raw_queries if str(q).strip()]
+        else:
+            single = (s.get("query") or "").strip()
+            queries = [single] if single else []
         anchor = (s.get("anchor") or "").strip()
-        if not query or not anchor:
+        if not queries or not anchor:
             continue
         year_val = s.get("expected_year")
         if isinstance(year_val, str):
@@ -271,7 +298,7 @@ def suggest_citations(
             year_val = None
         out.append(
             CitationSuggestion(
-                query=query,
+                queries=queries,
                 anchor=anchor,
                 reason=str(s.get("reason") or ""),
                 expected_first_author=s.get("expected_first_author") or None,
@@ -488,6 +515,134 @@ def verify_match(
         "llm.verify",
         "verdict",
         same=verdict.same_paper,
+        conf=round(verdict.confidence, 2),
+        reason=verdict.reasoning,
+    )
+    return verdict
+
+
+@dataclass
+class ClaimSupport:
+    """Verdict from the LLM-as-judge that decides whether a Scholar hit is the right
+    paper to cite for a particular prose claim. Used by ``suggest``."""
+
+    supports: bool
+    confidence: float  # 0.0 - 1.0
+    reasoning: str
+
+
+_CLAIM_SUPPORT_SYSTEM = """\
+You are an academic citation expert. The user has a CLAIM written in their paper
+and a CANDIDATE paper found via Google Scholar. Decide whether the CANDIDATE is the
+RIGHT paper to cite for this claim.
+
+ACCEPT (supports=true) when the CANDIDATE is the CANONICAL ORIGINAL paper that
+established / introduced / proposed the thing the claim attributes:
+  - Original introductions of named methods/systems (the Med-PaLM 2 paper for a
+    Med-PaLM 2 claim; the BERT paper for a BERT claim).
+  - The foundational paper for an attributed result or technique.
+  - Highly cited works in the relevant field/year that match the claim's subject.
+
+REJECT (supports=false) when the CANDIDATE is:
+  - A DERIVATIVE work: survey, review, retrospective, book chapter, or "Applications
+    of X" paper.
+  - A FOLLOW-UP that builds on but doesn't introduce the named thing.
+  - A paper on a DIFFERENT topic that just shares keywords with the claim.
+  - A paper whose authors / year are wildly implausible for the attribution.
+
+When uncertain and the candidate has a high citation count and a topic-matching title,
+ACCEPT. False rejections force the caller to retry; a missed citation is recoverable.
+But when the candidate is clearly a derivative (titles like "A survey of X" or
+"Applications of X"), REJECT firmly.
+
+Return a single JSON object:
+  {
+    "supports": true | false,
+    "confidence": 0.0 to 1.0,
+    "reasoning": "one short sentence — name the original / derivative signal"
+  }
+"""
+
+
+def verify_claim_support(
+    claim_text: str,
+    context: str,
+    candidate: PaperHit,
+    *,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> ClaimSupport:
+    """LLM-as-judge: does this Scholar candidate actually support the prose claim?
+
+    Conservative on failure — any error returns ``supports=False`` so the caller falls
+    through to the next candidate / query rather than writing a wrong citation.
+    """
+    try:
+        client, model_id = _get_client_and_model(api_key, model)
+    except Exception as e:
+        dbg.trace("llm.claim_support", "ERR client unavailable", error=str(e))
+        return ClaimSupport(False, 0.0, f"LLM client unavailable: {e}")
+
+    cand_surname = ""
+    if candidate.authors:
+        parts = candidate.authors[0].split()
+        cand_surname = parts[-1] if parts else ""
+
+    dbg.trace(
+        "llm.claim_support",
+        "calling",
+        model=model_id,
+        claim=claim_text,
+        cand_title=candidate.title,
+        cand_surname=cand_surname,
+        cand_year=candidate.year,
+        cand_cited=candidate.cited_by,
+    )
+
+    user_msg = (
+        "Does the CANDIDATE paper support the CLAIM? Return JSON.\n\n"
+        f"CLAIM (anchor in prose):\n  {claim_text!r}\n\n"
+        f"CONTEXT (surrounding paragraph):\n  {context!r}\n\n"
+        "CANDIDATE from Google Scholar:\n"
+        f"  title:                {candidate.title!r}\n"
+        f"  first_author_surname: {cand_surname!r}\n"
+        f"  year:                 {candidate.year}\n"
+        f"  venue:                {(candidate.venue or '')!r}\n"
+        f"  cited_by:             {candidate.cited_by}\n"
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": _CLAIM_SUPPORT_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        return ClaimSupport(False, 0.0, f"LLM call failed: {e}")
+
+    content = _safe_extract_content(resp)
+    if not content:
+        return ClaimSupport(False, 0.0, "no LLM response content")
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return ClaimSupport(False, 0.0, "LLM did not return valid JSON")
+    if not isinstance(data, dict):
+        return ClaimSupport(False, 0.0, "LLM response was not a JSON object")
+
+    verdict = ClaimSupport(
+        supports=bool(data.get("supports", False)),
+        confidence=float(data.get("confidence") or 0.0),
+        reasoning=str(data.get("reasoning") or ""),
+    )
+    dbg.trace(
+        "llm.claim_support",
+        "verdict",
+        supports=verdict.supports,
         conf=round(verdict.confidence, 2),
         reason=verdict.reasoning,
     )

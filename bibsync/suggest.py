@@ -20,8 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import bibtex, llm, picker, scholar, tex_rewrite
+from . import bibtex, dbg, llm, picker, scholar, tex_rewrite
 from .models import PaperHit
+
+# Try at most this many queries per claim, and at most this many top candidates
+# (sorted by cited_by) per claim when asking the LLM "does this support the claim?".
+MAX_QUERIES_PER_CLAIM = 3
+MAX_CANDIDATES_PER_CLAIM = 4
+CLAIM_SUPPORT_CONFIDENCE_FLOOR = 0.7
 
 _PARA_BOUNDARY = re.compile(r"\n\s*\n")
 _CITE_PRESENCE_RE = re.compile(r"\\(?:no)?cite\w*\s*(?:\[[^\]]*\])*\s*\{")
@@ -71,7 +77,23 @@ async def _resolve_suggestion(
     paragraph_idx: int,
     *,
     headless: bool,
+    model: Optional[str],
+    api_key: Optional[str],
 ) -> tuple[SuggestionResult, Optional[dict]]:
+    """Agentic pipeline for one suggested citation:
+
+      1. Run ALL of the LLM's proposed queries on Scholar; merge & dedupe candidates.
+      2. Sort merged candidates by ``cited_by`` (most-cited first — the original
+         paper is almost always vastly more cited than any derivative).
+      3. For the top N candidates, ask the LLM-as-judge whether each candidate
+         actually supports the prose claim. Accept the first ``supports=True`` with
+         confidence ≥ ``CLAIM_SUPPORT_CONFIDENCE_FLOOR``.
+      4. Fetch official BibTeX for the accepted candidate.
+
+    Returns ``(result, bibtex_entry_or_None)``. If the LLM rejects every candidate
+    across every query, the result is marked ``no_supporting_match`` and the caller
+    leaves both .tex and .bib untouched for this suggestion.
+    """
     result = SuggestionResult(
         paragraph_index=paragraph_idx,
         paragraph_preview=paragraph[:80] + ("…" if len(paragraph) > 80 else ""),
@@ -80,39 +102,103 @@ async def _resolve_suggestion(
         reason=suggestion.reason,
     )
 
-    try:
-        hits = await scholar.search(suggestion.query, headless=headless, max_results=5)
-    except Exception as e:
-        result.status = "error"
-        result.note = f"scholar search failed: {e}"
-        return result, None
+    dbg.trace(
+        "suggest.resolve",
+        "start",
+        anchor=suggestion.anchor,
+        queries=suggestion.queries,
+        para=paragraph_idx,
+    )
 
-    if not hits:
-        result.status = "no_scholar_hit"
-        result.note = f"no Scholar results for {suggestion.query!r}"
-        return result, None
-
-    top = hits[0]
-    candidates = [top]
-    if top.versions_url:
+    # Step 1: run each query, merge results, dedupe by cluster_id.
+    merged: dict[str, PaperHit] = {}
+    for q_idx, query in enumerate(suggestion.queries[:MAX_QUERIES_PER_CLAIM]):
+        dbg.trace("suggest.query", f"attempt #{q_idx + 1}", query=query)
         try:
-            versions = await scholar.fetch_versions(top.versions_url, headless=headless)
-            if versions:
-                candidates = versions
-        except Exception:
-            pass
+            hits = await scholar.search(query, headless=headless, max_results=6)
+        except Exception as e:
+            dbg.trace("suggest.query", "ERR", error=str(e))
+            continue
+        dbg.trace("suggest.query", f"got {len(hits)} hits")
+        for h in hits:
+            if h.cluster_id and h.cluster_id not in merged:
+                merged[h.cluster_id] = h
+        if len(merged) >= 6:
+            # Already have a healthy pool; stop spending queries.
+            break
 
-    canonical = picker.pick_canonical(candidates)
-    result.scholar_hit = canonical
-
-    if not canonical.cluster_id:
-        result.status = "error"
-        result.note = "canonical hit had no cluster id"
+    if not merged:
+        result.status = "no_scholar_hit"
+        result.note = f"no Scholar results across {len(suggestion.queries)} querie(s)"
+        dbg.trace("suggest.resolve", "no candidates from any query")
         return result, None
 
+    # Step 2: sort by cited_by DESC. Original foundational papers crush derivatives
+    # in citation count, so the most-cited heuristically-plausible candidate is the
+    # one to ask the LLM about first.
+    candidates = sorted(merged.values(), key=lambda h: (h.cited_by or 0), reverse=True)
+    dbg.trace("suggest.merge", f"{len(candidates)} unique candidates after dedupe")
+    for i, c in enumerate(candidates[:MAX_CANDIDATES_PER_CLAIM]):
+        dbg.trace(
+            "suggest.candidate",
+            f"#{i+1}",
+            title=c.title,
+            authors=(c.authors[0] if c.authors else ""),
+            year=c.year,
+            cited=c.cited_by,
+        )
+
+    # Step 3: LLM judges each top candidate against the claim.
+    accepted: Optional[PaperHit] = None
+    last_reason = ""
+    last_confidence = 0.0
+    for i, candidate in enumerate(candidates[:MAX_CANDIDATES_PER_CLAIM]):
+        verdict = llm.verify_claim_support(
+            claim_text=suggestion.anchor,
+            context=paragraph,
+            candidate=candidate,
+            model=model,
+            api_key=api_key,
+        )
+        last_reason = verdict.reasoning
+        last_confidence = verdict.confidence
+        if verdict.supports and verdict.confidence >= CLAIM_SUPPORT_CONFIDENCE_FLOOR:
+            accepted = candidate
+            dbg.trace(
+                "suggest.verify",
+                "ACCEPTED",
+                candidate_idx=i + 1,
+                conf=round(verdict.confidence, 2),
+                title=candidate.title,
+            )
+            break
+        dbg.trace(
+            "suggest.verify",
+            f"rejected #{i+1}",
+            conf=round(verdict.confidence, 2),
+            reason=verdict.reasoning,
+        )
+
+    if accepted is None:
+        result.status = "no_supporting_match"
+        result.note = (
+            f"LLM rejected all {min(len(candidates), MAX_CANDIDATES_PER_CLAIM)} "
+            f"top candidate(s) — last reason: {last_reason}"
+        )
+        result.scholar_hit = candidates[0]
+        return result, None
+
+    result.scholar_hit = accepted
+
+    if not accepted.cluster_id:
+        result.status = "error"
+        result.note = "accepted hit had no cluster id"
+        return result, None
+
+    # Step 4: fetch BibTeX for the LLM-verified canonical paper.
     try:
         bib_text = await scholar.fetch_bibtex_for_cluster(
-            canonical.cluster_id, headless=headless
+            accepted.cluster_id, headless=headless
         )
     except Exception as e:
         result.status = "error"
@@ -153,80 +239,121 @@ async def suggest_for_file(
 
     db = bibtex.load(bib_file)
 
-    for p_idx, paragraph in enumerate(paragraphs):
-        if only_paragraphs_without_cites and _has_existing_cite(paragraph):
-            report.paragraphs_with_existing_cites += 1
-            continue
+    dbg.trace(
+        "suggest.start",
+        tex=str(tex_file),
+        bib=str(bib_file),
+        paragraphs=len(paragraphs),
+    )
 
-        try:
-            suggestions = llm.suggest_citations(paragraph, model=model, api_key=api_key)
-        except Exception as e:
-            r = SuggestionResult(
-                paragraph_index=p_idx,
-                paragraph_preview=paragraph[:80],
-                query="",
-                anchor="",
-                reason="",
-                status="error",
-                note=f"llm suggest failed: {e}",
-            )
-            report.results.append(r)
-            continue
-
-        for sugg in suggestions:
-            r, entry = await _resolve_suggestion(
-                sugg, paragraph, p_idx, headless=headless
-            )
-
-            if entry is None:
-                report.results.append(r)
+    # Pool all Scholar calls in this run into ONE browser context.
+    async with scholar.shared_session(headless=headless):
+        for p_idx, paragraph in enumerate(paragraphs):
+            if only_paragraphs_without_cites and _has_existing_cite(paragraph):
+                report.paragraphs_with_existing_cites += 1
+                dbg.trace("suggest.paragraph", "skip (already has \\cite)", idx=p_idx)
                 continue
 
-            # Set the cite key. Prefer a clean derived key over Scholar's auto-generated one.
-            cite_key = bibtex.derive_cite_key(entry)
-            cite_key = bibtex.ensure_unique_key(db, cite_key)
-            entry["ID"] = cite_key
-            r.cite_key = cite_key
-
-            # Approval gate.
-            approved = auto_approve
-            if not approved and approve_fn is not None:
-                approved = approve_fn(r, entry)
-            elif not approved and approve_fn is None:
-                approved = True  # no approval callback provided; default to True
-
-            if not approved:
-                r.status = "skipped"
-                r.note = "user rejected"
-                report.results.append(r)
-                continue
-
-            # Check duplicate against current .bib state.
-            stored, was_added = bibtex.append_entry(db, entry)
-            if not was_added:
-                r.status = "duplicate"
-                r.cite_key = stored["ID"]
-                r.note = f"already in .bib as {stored['ID']}"
-            # Insert \cite{} into the .tex.
-            inserted = tex_rewrite.insert_cite_after_anchor(
-                tex_file, r.anchor, r.cite_key
+            dbg.trace(
+                "suggest.paragraph",
+                "scanning",
+                idx=p_idx,
+                preview=paragraph[:80],
             )
-            if not inserted:
-                inserted = tex_rewrite.append_cite_to_paragraph(
-                    tex_file, paragraph, r.cite_key
+            try:
+                suggestions = llm.suggest_citations(
+                    paragraph, model=model, api_key=api_key
                 )
-            if inserted and r.status != "duplicate":
-                r.status = "added"
-            elif not inserted:
-                r.status = "anchor_not_found"
-                r.note = "could not locate insertion point in .tex"
-            report.results.append(r)
+            except Exception as e:
+                r = SuggestionResult(
+                    paragraph_index=p_idx,
+                    paragraph_preview=paragraph[:80],
+                    query="",
+                    anchor="",
+                    reason="",
+                    status="error",
+                    note=f"llm suggest failed: {e}",
+                )
+                report.results.append(r)
+                continue
+            dbg.trace(
+                "suggest.paragraph",
+                "got suggestions",
+                idx=p_idx,
+                n=len(suggestions),
+            )
 
-            await asyncio.sleep(delay_seconds)
+            for sugg in suggestions:
+                r, entry = await _resolve_suggestion(
+                    sugg, paragraph, p_idx,
+                    headless=headless, model=model, api_key=api_key,
+                )
+
+                if entry is None:
+                    report.results.append(r)
+                    continue
+
+                # Set cite key from corrected metadata.
+                cite_key = bibtex.derive_cite_key(entry)
+                cite_key = bibtex.ensure_unique_key(db, cite_key)
+                entry["ID"] = cite_key
+                r.cite_key = cite_key
+                dbg.trace(
+                    "suggest.commit",
+                    "proposing",
+                    cite_key=cite_key,
+                    anchor=r.anchor,
+                )
+
+                # Approval gate.
+                approved = auto_approve
+                if not approved and approve_fn is not None:
+                    approved = approve_fn(r, entry)
+                elif not approved and approve_fn is None:
+                    approved = True  # default to True when no callback provided
+
+                if not approved:
+                    r.status = "skipped"
+                    r.note = "user rejected"
+                    dbg.trace("suggest.commit", "user rejected", cite_key=cite_key)
+                    report.results.append(r)
+                    continue
+
+                # Check duplicate against current .bib state.
+                stored, was_added = bibtex.append_entry(db, entry)
+                if not was_added:
+                    r.status = "duplicate"
+                    r.cite_key = stored["ID"]
+                    r.note = f"already in .bib as {stored['ID']}"
+                    dbg.trace("suggest.commit", "duplicate", existing_key=stored["ID"])
+
+                # Insert \cite{} into the .tex at the LLM-provided anchor.
+                inserted = tex_rewrite.insert_cite_after_anchor(
+                    tex_file, r.anchor, r.cite_key
+                )
+                if not inserted:
+                    inserted = tex_rewrite.append_cite_to_paragraph(
+                        tex_file, paragraph, r.cite_key
+                    )
+                if inserted and r.status != "duplicate":
+                    r.status = "added"
+                elif not inserted:
+                    r.status = "anchor_not_found"
+                    r.note = "could not locate insertion point in .tex"
+                dbg.trace(
+                    "suggest.commit",
+                    "done",
+                    cite_key=r.cite_key,
+                    status=r.status,
+                )
+                report.results.append(r)
+
+                await asyncio.sleep(delay_seconds)
 
     # Single .bib write at the end.
     if any(r.status in ("added", "duplicate") for r in report.results):
         bibtex.dump(db, bib_file)
+        dbg.trace("suggest.done", "bib written", path=str(bib_file))
 
     return report
 
