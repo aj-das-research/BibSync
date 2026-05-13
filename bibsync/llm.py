@@ -354,56 +354,36 @@ def parse_bibitem(
 
 
 _VERIFY_MATCH_SYSTEM = """\
-You are a STRICT academic citation matcher. Your DEFAULT verdict is REJECT
-(same_paper=false). Only ACCEPT (same_paper=true) when ALL strict criteria hold.
+You are a semantic citation matcher. The caller has ALREADY verified, in code, that:
+  - The CANDIDATE's first-author surname matches the ORIGINAL's first-author surname.
+  - The CANDIDATE's year is within ±3 of the ORIGINAL's year.
+  - The CANDIDATE's title is highly similar to the ORIGINAL's title.
 
-You compare an ORIGINAL paper to a CANDIDATE from Google Scholar.
+DO NOT re-check year arithmetic. DO NOT re-check author surnames. Those have been
+deterministically validated already; your math will be less reliable than the code's.
 
-REJECT IMMEDIATELY (same_paper=false) if ANY of these is true:
+Your ONLY job: decide whether the CANDIDATE is the SAME work as the ORIGINAL, or a
+DIFFERENT work (a derivative or unrelated paper) that happens to be structurally similar.
 
-  R1. The CANDIDATE's first-author surname does not match the ORIGINAL's first-author
-      surname (case-insensitive, allowing transliteration like "Müller"≈"Mueller").
-      Examples of REJECT: "Vaswani" vs "Mineault", "Moor" vs "Di", "Goodfellow" vs
-      "Labaca-Castro", "Singhal" vs "Kanjilal".
+REJECT (same_paper=false) ONLY if the CANDIDATE is a DERIVATIVE work, such as:
+  - "A review of <X>" / "A survey of <X>" / "<X>: an overview"
+  - "Applications of <X> in <domain>"
+  - "Towards <X>", "Is <X>?", "Will <X>?" — typically commentary/position pieces
+  - A book chapter ABOUT or building on the original, not the original paper itself
+  - A follow-up paper by similar authors but on a different topic
 
-  R2. The CANDIDATE's year differs from the ORIGINAL's year by MORE THAN 3
-      (i.e., abs(candidate_year - original_year) > 3). The arXiv → conference →
-      journal → republished-chapter drift can span up to 3 years and the candidate
-      may still be the SAME paper. ONLY reject when the gap is strictly larger
-      than 3 years. Years that are exactly equal, or differ by 1, 2, or 3, are
-      ACCEPTABLE on this dimension.
+ACCEPT (same_paper=true) if the CANDIDATE is the same paper as the ORIGINAL — same
+work, same topic, structural fields already match. Title and year drift between
+arXiv preprints and published proceedings is normal and ACCEPTABLE.
 
-  R3. The CANDIDATE is a DERIVATIVE work, not the ORIGINAL itself. Reject if the
-      CANDIDATE title contains words like:
-        - "Review", "Survey", "Overview" of the topic
-        - "Applications of <X>", "<X> in <domain>" when X is the original system
-        - "Towards", "Will", "Is" — often signal commentary/position papers
-        - "Chapter ABOUT", "Foundations of", encyclopedia entries
-        - Same title but a much later year suggesting a textbook chapter
-
-  R4. The CANDIDATE's title describes a DIFFERENT subject matter from the ORIGINAL,
-      even if some keywords overlap. Example: ORIGINAL "Foundation models for
-      generalist medical AI" vs CANDIDATE "Will generalist medical AI be the future
-      path for NLP models" — these are different papers despite shared phrase.
-
-ACCEPT (same_paper=true) ONLY if ALL of these hold:
-
-  A1. First-author surnames match (per R1).
-  A2. Years agree within ±3 (per R2).
-  A3. CANDIDATE title is semantically the same paper as ORIGINAL (minor
-      punctuation/case/order differences OK; substantive title changes are NOT OK).
-  A4. CANDIDATE is the ORIGINAL paper, not a derivative work (per R3).
-
-Bias HEAVILY toward rejection. If you are not >90% certain it's the same paper,
-return same_paper=false with confidence reflecting your uncertainty. A wrong accept
-permanently corrupts the user's bibliography; a wrong reject just means the caller
-retries with a different query.
+When the structural fields already match and you see no derivative-work signal,
+ACCEPT. Refusing the obvious original wastes user time without protecting them.
 
 Return a single JSON object:
   {
     "same_paper": true | false,
     "confidence": 0.0 to 1.0,
-    "reasoning": "one short sentence naming the specific rule (R1-R4 or A1-A4) that applied"
+    "reasoning": "one short sentence — 'same work, original paper' or naming the derivative-work signal"
   }
 """
 
@@ -429,31 +409,51 @@ def verify_match(
         return MatchVerification(False, 0.0, f"LLM client unavailable: {e}")
 
     bib_venue = (bib_entry.get("booktitle") or bib_entry.get("journal") or "").strip()
+
+    # Pre-extract first-author surnames so the LLM sees normalized, single-token
+    # comparison inputs (instead of "Goodfellow, Ian and Pouget-Abadie and ..." which
+    # gpt-4o-mini has been observed to misread).
+    def _surname_from(field: str) -> str:
+        if not field:
+            return ""
+        first = field.split(" and ")[0].strip()
+        if "," in first:
+            return first.split(",")[0].strip()
+        parts = first.split()
+        return parts[-1] if parts else ""
+
+    bib_surname = _surname_from(bib_entry.get("author", "") or "")
+    cand_surname = ""
+    if candidate.authors:
+        parts = candidate.authors[0].split()
+        cand_surname = parts[-1] if parts else ""
+
     dbg.trace(
         "llm.verify",
         "calling",
         model=model_id,
         bib_title=bib_entry.get("title", ""),
-        bib_author=bib_entry.get("author", ""),
+        bib_surname=bib_surname,
         bib_year=bib_entry.get("year", ""),
         cand_title=candidate.title,
-        cand_author=(candidate.authors[0] if candidate.authors else ""),
+        cand_surname=cand_surname,
         cand_year=candidate.year,
         cand_cited=candidate.cited_by,
     )
     user_msg = (
-        "Are these the same paper? Return JSON.\n\n"
+        "Structural fields already match (surname, year ±3, title similarity). "
+        "Decide whether the CANDIDATE is the SAME WORK or a DERIVATIVE. Return JSON.\n\n"
         "ORIGINAL .bib entry:\n"
-        f"  title:   {bib_entry.get('title', '')!r}\n"
-        f"  authors: {bib_entry.get('author', '')!r}\n"
-        f"  year:    {bib_entry.get('year', '')!r}\n"
-        f"  venue:   {bib_venue!r}\n\n"
+        f"  title:                {bib_entry.get('title', '')!r}\n"
+        f"  first_author_surname: {bib_surname!r}\n"
+        f"  year:                 {bib_entry.get('year', '')!r}\n"
+        f"  venue:                {bib_venue!r}\n\n"
         "CANDIDATE from Google Scholar:\n"
-        f"  title:    {candidate.title!r}\n"
-        f"  authors:  {', '.join(candidate.authors)!r}\n"
-        f"  year:     {candidate.year}\n"
-        f"  venue:    {(candidate.venue or '')!r}\n"
-        f"  cited_by: {candidate.cited_by}\n"
+        f"  title:                {candidate.title!r}\n"
+        f"  first_author_surname: {cand_surname!r}\n"
+        f"  year:                 {candidate.year}\n"
+        f"  venue:                {(candidate.venue or '')!r}\n"
+        f"  cited_by:             {candidate.cited_by}\n"
     )
 
     try:

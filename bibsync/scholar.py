@@ -184,6 +184,8 @@ def _parse_search_results(html: str) -> list[PaperHit]:
         title = re.sub(r"<[^>]+>", "", title_html)
         title = re.sub(r"\s+", " ", title).replace("[PDF]", "").replace("[HTML]", "").strip()
         title = title.lstrip("[").rstrip("]").strip()
+        # Strip zero-width directional markers Scholar appends (U+200E, U+200F).
+        title = title.replace("‎", "").replace("‏", "").strip()
 
         authors_block_m = re.search(
             r'<div\s+[^>]*\bclass="[^"]*\bgs_a\b[^"]*"[^>]*>(.*?)</div>',
@@ -207,10 +209,22 @@ def _parse_search_results(html: str) -> list[PaperHit]:
                 venue_part = re.sub(r",?\s*\b(19|20)\d{2}\b", "", middle).strip().strip(",")
                 venue = venue_part or None
 
+        # Citation count: try several patterns since Scholar's HTML varies (and
+        # localisation/HTML-entity quirks creep in).
         cited_by = 0
-        cited_m = re.search(r"Cited by (\d+)", block)
-        if cited_m:
-            cited_by = int(cited_m.group(1))
+        for pat in (
+            r"Cited by[\s&nbsp;]+(\d+)",
+            r">Cited by\s*(?:<[^>]+>)?\s*(\d+)",
+            r'href="[^"]*\bcites=\d+[^"]*"[^>]*>[^<]*?(\d+)',
+            r"Cited by[^0-9]{1,8}(\d+)",
+        ):
+            cm = re.search(pat, block)
+            if cm:
+                try:
+                    cited_by = int(cm.group(1))
+                    break
+                except (ValueError, IndexError):
+                    continue
 
         versions_url: Optional[str] = None
         versions_m = re.search(
@@ -296,11 +310,13 @@ async def _save_debug_html(html: str, query: str) -> None:
 async def search(query: str, *, headless: bool = False, max_results: int = 10) -> list[PaperHit]:
     """Search Google Scholar by *typing into the search box*, then waiting for results.
 
-    This mimics a real user session: land on the home page, focus the search box,
-    type the query with per-keystroke delays, press Enter, then wait for either a
-    result container OR a "no results" alert OR a CAPTCHA to appear before reading
-    the HTML. The combination of human-paced input + proper wait condition
-    dramatically reduces the "page returned but no results parsed" failure mode.
+    Wait strategy (Scholar loads results in two waves — DOM, then async citation counts):
+      1. Wait for the result container (``div.gs_r`` / alert / captcha) — up to 25s.
+      2. Wait for citation-count anchors (``a[href*="cites="]``) to populate — up to 12s.
+         These load AFTER the initial DOM, and without this wait every parsed hit has
+         ``cited_by=0`` (which breaks the cited-by-first sort downstream).
+      3. Wait for network idle (no requests for 500ms) — up to 8s.
+      4. Final 2.5s jitter so any deferred JS finishes.
     """
     dbg.trace("scholar.search", query=query, max_results=max_results)
     async with _ctx_or_new(headless=headless) as ctx:
@@ -309,10 +325,11 @@ async def search(query: str, *, headless: bool = False, max_results: int = 10) -
             dbg.trace("scholar.search", "navigating to home")
             await page.goto(f"{SCHOLAR_BASE}/", wait_until="domcontentloaded")
             await _await_no_captcha(page)
+            await asyncio.sleep(0.5)  # let home page settle
 
             search_box = page.locator("input[name='q']").first
             try:
-                await search_box.wait_for(timeout=10_000)
+                await search_box.wait_for(timeout=15_000)
             except Exception:
                 dbg.trace("scholar.search", "search box not found; falling back to URL nav")
                 await page.goto(
@@ -322,21 +339,45 @@ async def search(query: str, *, headless: bool = False, max_results: int = 10) -
             else:
                 dbg.trace("scholar.search", "typing query into search box")
                 await search_box.fill("")
-                await search_box.type(query, delay=35)
+                await search_box.type(query, delay=45)
+                await asyncio.sleep(0.3)
                 await search_box.press("Enter")
 
-            dbg.trace("scholar.search", "waiting for results to render")
+            dbg.trace("scholar.search", "waiting for result containers (up to 25s)")
             try:
                 await page.wait_for_selector(
                     "div.gs_r, .gs_alrt, form#gs_captcha_f",
-                    timeout=15_000,
+                    timeout=25_000,
                 )
                 dbg.trace("scholar.search", "result containers appeared")
             except Exception:
-                dbg.trace("scholar.search", "WARN: wait_for_selector timed out")
+                dbg.trace("scholar.search", "WARN: result containers timed out")
 
             await _await_no_captcha(page)
-            await asyncio.sleep(0.6)
+
+            # Critical: wait for citation-count anchors. Scholar injects these AFTER
+            # the initial result DOM; reading too early gives cited_by=0 everywhere.
+            dbg.trace("scholar.search", "waiting for citation anchors to populate (up to 12s)")
+            try:
+                await page.wait_for_function(
+                    "() => document.querySelectorAll('a[href*=\"cites=\"]').length > 0",
+                    timeout=12_000,
+                )
+                dbg.trace("scholar.search", "citation anchors present")
+            except Exception:
+                dbg.trace(
+                    "scholar.search",
+                    "WARN: citation anchors did not appear in 12s; "
+                    "cited_by may be 0 for parsed hits",
+                )
+
+            # Let any deferred JS finish (network idle + final jitter).
+            try:
+                await page.wait_for_load_state("networkidle", timeout=8_000)
+                dbg.trace("scholar.search", "network idle")
+            except Exception:
+                dbg.trace("scholar.search", "networkidle timed out (continuing)")
+            await asyncio.sleep(2.5)
 
             html = await page.content()
             dbg.trace("scholar.search", "got HTML", chars=len(html))
