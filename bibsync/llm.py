@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
-from . import config
+from . import config, dbg
 from .models import PaperHit
 
 
@@ -425,9 +425,22 @@ def verify_match(
     try:
         client, model_id = _get_client_and_model(api_key, model)
     except Exception as e:
+        dbg.trace("llm.verify", "ERR client unavailable", error=str(e))
         return MatchVerification(False, 0.0, f"LLM client unavailable: {e}")
 
     bib_venue = (bib_entry.get("booktitle") or bib_entry.get("journal") or "").strip()
+    dbg.trace(
+        "llm.verify",
+        "calling",
+        model=model_id,
+        bib_title=bib_entry.get("title", ""),
+        bib_author=bib_entry.get("author", ""),
+        bib_year=bib_entry.get("year", ""),
+        cand_title=candidate.title,
+        cand_author=(candidate.authors[0] if candidate.authors else ""),
+        cand_year=candidate.year,
+        cand_cited=candidate.cited_by,
+    )
     user_msg = (
         "Are these the same paper? Return JSON.\n\n"
         "ORIGINAL .bib entry:\n"
@@ -466,11 +479,19 @@ def verify_match(
     if not isinstance(data, dict):
         return MatchVerification(False, 0.0, "LLM response was not a JSON object")
 
-    return MatchVerification(
+    verdict = MatchVerification(
         same_paper=bool(data.get("same_paper", False)),
         confidence=float(data.get("confidence") or 0.0),
         reasoning=str(data.get("reasoning") or ""),
     )
+    dbg.trace(
+        "llm.verify",
+        "verdict",
+        same=verdict.same_paper,
+        conf=round(verdict.confidence, 2),
+        reason=verdict.reasoning,
+    )
+    return verdict
 
 
 @dataclass
@@ -505,17 +526,35 @@ def pick_verified_match(
     Scholar hit ever reaches the .bib.
     """
     if not candidates:
+        dbg.trace("llm.pick", "no candidates supplied")
         return VerifiedPick(None, 0.0, "no candidates supplied", 0)
+
+    dbg.trace(
+        "llm.pick",
+        "starting",
+        candidates=len(candidates),
+        will_check=min(len(candidates), max_candidates),
+        floor=confidence_floor,
+    )
 
     last_reasoning = ""
     last_confidence = 0.0
     considered = 0
     for candidate in candidates[:max_candidates]:
         considered += 1
+        dbg.trace("llm.pick", f"checking candidate #{considered}", title=candidate.title)
         verdict = verify_match(expected, candidate, model=model, api_key=api_key)
         last_reasoning = verdict.reasoning
         last_confidence = verdict.confidence
         if verdict.same_paper and verdict.confidence >= confidence_floor:
+            dbg.trace(
+                "llm.pick",
+                "ACCEPTED",
+                index=considered,
+                conf=round(verdict.confidence, 2),
+                title=candidate.title,
+            )
             return VerifiedPick(candidate, verdict.confidence, verdict.reasoning, considered)
 
+    dbg.trace("llm.pick", "REJECTED all", considered=considered, last_reason=last_reasoning)
     return VerifiedPick(None, last_confidence, last_reasoning, considered)

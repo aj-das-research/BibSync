@@ -26,7 +26,7 @@ from typing import Optional
 
 from rapidfuzz import fuzz
 
-from . import bibtex, llm, scholar, tex_rewrite
+from . import bibtex, dbg, llm, scholar, tex_rewrite
 from .models import PaperHit
 
 LLM_CONFIDENCE_FLOOR = 0.7  # LLM verdict must be at least this confident to accept a match
@@ -192,7 +192,8 @@ async def _search_and_pick(
     headless: bool,
     model: Optional[str],
     api_key: Optional[str],
-) -> _PickResult:
+) -> _PickResult:  # noqa: D401
+    dbg.trace("fix.search_and_pick", entry_id=entry.get("ID", "?"), query=query)
     """Run a Scholar search, filter heuristically, then ask the LLM to verify identity.
 
     Pipeline (each layer eliminates non-matches before the next, cheaper-to-most-expensive):
@@ -218,7 +219,25 @@ async def _search_and_pick(
         plausible = _is_plausible_match(entry, h)
         scored.append((title_score, h, plausible))
 
+    # Trace each hit's heuristic outcome before filtering.
+    for s, h, (ok, reason) in scored:
+        dbg.trace(
+            "fix.heuristic",
+            ("pass" if (ok and s >= 60) else "reject"),
+            sim=s,
+            cited=h.cited_by,
+            year=h.year,
+            title=h.title,
+            why=("" if ok else reason),
+        )
+
     plausible_hits = [(s, h) for (s, h, (ok, _)) in scored if ok and s >= 60]
+    dbg.trace(
+        "fix.heuristic",
+        "summary",
+        passed=len(plausible_hits),
+        total=len(scored),
+    )
     if not plausible_hits:
         scored.sort(key=lambda t: t[0], reverse=True)
         top_score, _, (_, reason) = scored[0]
@@ -233,6 +252,15 @@ async def _search_and_pick(
         key=lambda t: ((t[1].cited_by or 0), t[0]),
         reverse=True,
     )
+    for i, (s, h) in enumerate(plausible_hits[:MAX_LLM_CANDIDATES]):
+        dbg.trace(
+            "fix.sorted",
+            f"#{i+1}",
+            sim=s,
+            cited=h.cited_by,
+            year=h.year,
+            title=h.title,
+        )
 
     # LLM verification — the safety net that catches title-similar-but-different papers.
     # Delegated to the universal pick_verified_match agent so fix shares one verification
@@ -278,29 +306,39 @@ async def _fix_one(
     """Returns (FixResult, merged_entry_or_None). If merged_entry is None, keep the original."""
     original_key = entry.get("ID", "?")
     title = entry.get("title", "")
+    dbg.trace(
+        "fix.entry",
+        "start",
+        key=original_key,
+        title=title,
+        author=entry.get("author", ""),
+        year=entry.get("year", ""),
+        regenerate_keys=regenerate_keys,
+    )
     result = FixResult(original_key=original_key, new_key=original_key, status="pending")
 
     if not title:
         result.status = "unverified"
         result.note = "entry has no title field"
+        dbg.trace("fix.entry", "skip: no title", key=original_key)
         return result, None
 
     base_query = re.sub(r"[{}\\]", "", title)
+    dbg.trace("fix.query", "attempt #1 (title only)", query=base_query)
     pick = await _search_and_pick(
         entry, base_query, headless=headless, model=model, api_key=api_key
     )
 
-    # If title-only search yielded no LLM-verified match, retry with refined query.
     if pick.hit is None:
         refined = _build_refined_query(entry)
         if refined and refined != base_query:
+            dbg.trace("fix.query", "attempt #2 (refined: title + author)", query=refined)
             pick2 = await _search_and_pick(
                 entry, refined, headless=headless, model=model, api_key=api_key
             )
             if pick2.hit is not None:
                 pick = pick2
             else:
-                # Keep the better diagnostic between the two attempts.
                 pick = pick2 if pick2.rejection_reason else pick
 
     result.title_similarity = pick.title_similarity
@@ -312,6 +350,13 @@ async def _fix_one(
             "error" if pick.rejection_reason.startswith("scholar search failed") else "unverified"
         )
         result.note = pick.rejection_reason or "no plausible Scholar match"
+        dbg.trace(
+            "fix.entry",
+            "done (no match)",
+            key=original_key,
+            status=result.status,
+            note=result.note,
+        )
         return result, None
 
     best = pick.hit
@@ -362,6 +407,14 @@ async def _fix_one(
     else:
         result.status = "rewritten"
 
+    dbg.trace(
+        "fix.entry",
+        "done",
+        key=original_key,
+        new_key=result.new_key,
+        status=result.status,
+        changes=len(result.field_changes),
+    )
     return result, merged
 
 

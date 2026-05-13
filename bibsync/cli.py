@@ -16,6 +16,7 @@ from . import (
     __version__,
     bibtex,
     config as cfg,
+    dbg,
     extract as extract_mod,
     fix as fix_mod,
     llm as llm_mod,
@@ -65,8 +66,18 @@ _model_option = click.option(
 
 @click.group()
 @click.version_option(__version__, prog_name="bibsync")
-def main() -> None:
+@click.option(
+    "--debug",
+    is_flag=True,
+    envvar="BIBSYNC_DEBUG",
+    help="Emit per-step pipeline traces to stderr — Scholar searches, heuristic "
+    "filter outcomes, LLM verdicts, candidate orderings. Useful when reporting bugs.",
+)
+def main(debug: bool) -> None:
     """BibSync — automate Google Scholar BibTeX and reconcile citations in LaTeX projects."""
+    if debug:
+        dbg.enable()
+        console.print("[dim][debug] tracing enabled — events go to stderr[/dim]")
 
 
 # add --------------------------------------------------------------------------

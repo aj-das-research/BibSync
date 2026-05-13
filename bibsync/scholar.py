@@ -21,6 +21,7 @@ from typing import AsyncIterator, Optional
 
 from platformdirs import user_data_dir
 
+from . import dbg
 from .models import PaperHit
 
 # Module-level shared browser context, set by ``shared_session``. When set, the
@@ -301,52 +302,65 @@ async def search(query: str, *, headless: bool = False, max_results: int = 10) -
     the HTML. The combination of human-paced input + proper wait condition
     dramatically reduces the "page returned but no results parsed" failure mode.
     """
+    dbg.trace("scholar.search", query=query, max_results=max_results)
     async with _ctx_or_new(headless=headless) as ctx:
         page = await ctx.new_page()
         try:
-            # 1. Land on the Scholar home page. Looks more natural than navigating
-            #    straight to /scholar?q=... and gives the search box a moment to bind.
+            dbg.trace("scholar.search", "navigating to home")
             await page.goto(f"{SCHOLAR_BASE}/", wait_until="domcontentloaded")
             await _await_no_captcha(page)
 
-            # 2. Find the search box and type the query (with key delays).
-            #    Scholar's input is name="q" (top bar) — fall back to selector if needed.
             search_box = page.locator("input[name='q']").first
             try:
                 await search_box.wait_for(timeout=10_000)
             except Exception:
-                # Couldn't find search box on home — fall back to direct URL.
+                dbg.trace("scholar.search", "search box not found; falling back to URL nav")
                 await page.goto(
                     f"{SCHOLAR_BASE}/scholar?q={urllib.parse.quote(query)}&hl=en",
                     wait_until="domcontentloaded",
                 )
             else:
-                await search_box.fill("")  # clear any prior text
-                await search_box.type(query, delay=35)  # ~35ms/key ≈ human typing speed
+                dbg.trace("scholar.search", "typing query into search box")
+                await search_box.fill("")
+                await search_box.type(query, delay=35)
                 await search_box.press("Enter")
 
-            # 3. Wait for results to render. Scholar fills #gs_res_ccl with .gs_r
-            #    divs once results are ready; .gs_alrt is the "no results" message;
-            #    captcha forms also appear here.
+            dbg.trace("scholar.search", "waiting for results to render")
             try:
                 await page.wait_for_selector(
                     "div.gs_r, .gs_alrt, form#gs_captcha_f",
                     timeout=15_000,
                 )
+                dbg.trace("scholar.search", "result containers appeared")
             except Exception:
-                pass  # Continue with whatever we have
+                dbg.trace("scholar.search", "WARN: wait_for_selector timed out")
 
             await _await_no_captcha(page)
-
-            # 4. Small jitter — let any deferred JS hydrate.
             await asyncio.sleep(0.6)
 
             html = await page.content()
+            dbg.trace("scholar.search", "got HTML", chars=len(html))
             hits = _parse_search_results(html)[:max_results]
+            dbg.trace("scholar.search", f"parsed {len(hits)} hits")
+            for i, h in enumerate(hits[:5]):
+                dbg.trace(
+                    "scholar.parse",
+                    f"hit[{i}]",
+                    title=h.title,
+                    authors=(h.authors[0] if h.authors else ""),
+                    year=h.year,
+                    cited=h.cited_by,
+                    cluster=h.cluster_id,
+                )
             if not hits:
                 print(f"[bibsync] {_diagnose_empty_result(html, query)}")
                 await _save_debug_html(html, query)
                 _CONSECUTIVE_EMPTY_COUNT.set(_CONSECUTIVE_EMPTY_COUNT.get() + 1)
+                dbg.trace(
+                    "scholar.search",
+                    "empty result",
+                    consecutive=_CONSECUTIVE_EMPTY_COUNT.get(),
+                )
             else:
                 _CONSECUTIVE_EMPTY_COUNT.set(0)
             return hits
@@ -356,6 +370,7 @@ async def search(query: str, *, headless: bool = False, max_results: int = 10) -
 
 async def fetch_versions(versions_url: str, *, headless: bool = False) -> list[PaperHit]:
     """Fetch the 'All N versions' page for a paper cluster."""
+    dbg.trace("scholar.versions", url=versions_url)
     async with _ctx_or_new(headless=headless) as ctx:
         page = await ctx.new_page()
         try:
@@ -366,10 +381,12 @@ async def fetch_versions(versions_url: str, *, headless: bool = False) -> list[P
                     "div.gs_r, .gs_alrt, form#gs_captcha_f", timeout=10_000
                 )
             except Exception:
-                pass
+                dbg.trace("scholar.versions", "WARN: wait_for_selector timed out")
             await asyncio.sleep(0.4)
             html = await page.content()
-            return _parse_search_results(html)
+            hits = _parse_search_results(html)
+            dbg.trace("scholar.versions", f"parsed {len(hits)} version(s)")
+            return hits
         finally:
             await page.close()
 
@@ -384,16 +401,16 @@ async def fetch_bibtex_for_cluster(cluster_id: str, *, headless: bool = False) -
 
     # Search-by-cluster gives a single result we can click reliably.
     url = f"{SCHOLAR_BASE}/scholar?cluster={cluster_id}&hl=en"
+    dbg.trace("scholar.fetch_bibtex", cluster=cluster_id)
     async with _ctx_or_new(headless=headless) as ctx:
         page = await ctx.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await _await_no_captcha(page)
-            # Make sure the result row is rendered before we hunt for the cite link.
             try:
                 await page.wait_for_selector("div.gs_r", timeout=10_000)
             except Exception:
-                pass
+                dbg.trace("scholar.fetch_bibtex", "WARN: no gs_r row on cluster page")
             await asyncio.sleep(0.4)
 
             # The cite icon for each result has class gs_or_cit (anchor with onclick).

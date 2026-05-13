@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from . import bibtex, llm, picker, scanner, scholar
+from . import bibtex, dbg, llm, picker, scanner, scholar
 from .models import PaperHit
 
 DEFAULT_CONFIDENCE_FLOOR = 0.6
@@ -88,6 +88,7 @@ async def _resolve_one(
 ) -> tuple[ExtractResult, Optional[dict]]:
     """Resolve one key. Returns (result, parsed_bibtex_entry_or_None)."""
     result = ExtractResult(cite_key=cite_key)
+    dbg.trace("extract.entry", "start", key=cite_key)
 
     try:
         inferred = llm.infer_paper_from_cite_key(
@@ -96,8 +97,17 @@ async def _resolve_one(
     except Exception as e:
         result.status = "error"
         result.note = f"llm inference failed: {e}"
+        dbg.trace("extract.entry", "ERR inference", key=cite_key, error=str(e))
         return result, None
     result.inferred = inferred
+    dbg.trace(
+        "extract.inferred",
+        key=cite_key,
+        title=inferred.title,
+        first_author=inferred.first_author,
+        year=inferred.year,
+        conf=round(inferred.confidence, 2),
+    )
 
     if not inferred.title or inferred.confidence < confidence_floor:
         result.status = "low_confidence"
