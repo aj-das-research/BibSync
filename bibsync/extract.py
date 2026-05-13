@@ -115,6 +115,34 @@ async def _resolve_one(
     canonical = picker.pick_canonical(candidates)
     result.scholar_hit = canonical
 
+    # LLM-as-judge: verify Scholar's pick really is the paper the LLM inferred from
+    # the cite key. Catches the "Will generalist medical AI..." vs "Foundation models
+    # for generalist medical AI" class of wrong-paper matches.
+    expected = {
+        "title": inferred.title,
+        "author": inferred.first_author or "",
+        "year": str(inferred.year) if inferred.year else "",
+    }
+    # Try the top few candidates rather than only the heuristic-canonical one — Scholar's
+    # ranking sometimes puts the real paper second/third.
+    verification = llm.pick_verified_match(
+        expected,
+        candidates,
+        model=openai_model,
+        api_key=api_key,
+    )
+    if verification.hit is None:
+        result.status = "wrong_match"
+        result.scholar_hit = candidates[0] if candidates else None
+        result.note = (
+            f"LLM rejected Scholar top {verification.candidates_considered} "
+            f"hit(s): {verification.reasoning}"
+        )
+        return result, None
+    # Adopt the LLM-verified candidate (may differ from the heuristic canonical).
+    canonical = verification.hit
+    result.scholar_hit = canonical
+
     if not canonical.cluster_id:
         result.status = "error"
         result.note = "canonical hit had no cluster id"
@@ -167,39 +195,46 @@ async def extract_from_file(
 
     resolved_entries: list[tuple[ExtractResult, dict]] = []
 
-    for i, (cite_key, use) in enumerate(keys_with_context.items()):
-        if only_missing and cite_key in existing_keys:
-            r = ExtractResult(cite_key=cite_key, status="duplicate", note="already in .bib")
+    # Pool all Scholar calls for this run into a single browser context.
+    async with scholar.shared_session(headless=headless):
+        for i, (cite_key, use) in enumerate(keys_with_context.items()):
+            if only_missing and cite_key in existing_keys:
+                r = ExtractResult(
+                    cite_key=cite_key, status="duplicate", note="already in .bib"
+                )
+                report.results.append(r)
+                continue
+
+            r, entry = await _resolve_one(
+                cite_key,
+                use,
+                headless=headless,
+                confidence_floor=confidence_floor,
+                openai_model=openai_model,
+                api_key=api_key,
+            )
+            if entry is not None:
+                # Force the BibTeX key to match the user's existing \cite{} so we don't
+                # break the LaTeX source.
+                entry["ID"] = cite_key
+                resolved_entries.append((r, entry))
             report.results.append(r)
-            continue
 
-        r, entry = await _resolve_one(
-            cite_key,
-            use,
-            headless=headless,
-            confidence_floor=confidence_floor,
-            openai_model=openai_model,
-            api_key=api_key,
-        )
-        if entry is not None:
-            # Force the BibTeX key to match the user's existing \cite{} so we don't
-            # break the LaTeX source.
-            entry["ID"] = cite_key
-            resolved_entries.append((r, entry))
-        report.results.append(r)
+            if i < len(keys_with_context) - 1:
+                await asyncio.sleep(delay_seconds)
 
-        if i < len(keys_with_context) - 1:
-            await asyncio.sleep(delay_seconds)
-
-    # Commit additions as a single write at the end.
+    # Commit additions as a single write at the end — only if something was added.
     if resolved_entries:
+        any_new = False
         for r, entry in resolved_entries:
             stored, was_added = bibtex.append_entry(db, entry)
             r.bibtex_key = stored["ID"]
             r.status = "added" if was_added else "duplicate"
             if not was_added:
                 r.note = f"fuzzy-matched existing entry {stored['ID']}"
-        bibtex.dump(db, bib_file)
+            any_new = any_new or was_added
+        if any_new:
+            bibtex.dump(db, bib_file)
 
     return report
 

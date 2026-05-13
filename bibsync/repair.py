@@ -149,10 +149,37 @@ async def _repair_one(
                 candidates = versions
         except Exception:
             pass
-    canonical = picker.pick_canonical(candidates)
+    # Add the other top Scholar hits as additional candidates for the LLM judge so
+    # we recover gracefully when the title-fuzz best isn't the true match.
+    for h in hits[:3]:
+        if h not in candidates:
+            candidates.append(h)
+
+    # LLM-as-judge: verify against the metadata parsed from the original \bibitem block.
+    expected = {
+        "title": parsed.title or "",
+        "author": " and ".join(parsed.authors[:3]) if parsed.authors else "",
+        "year": str(parsed.year) if parsed.year else "",
+    }
+    verification = llm.pick_verified_match(
+        expected,
+        candidates,
+        model=openai_model,
+        api_key=api_key,
+    )
+    if verification.hit is None:
+        result.status = "no_verified_match"
+        result.scholar_hit = candidates[0] if candidates else None
+        result.note = (
+            f"LLM rejected Scholar top {verification.candidates_considered} "
+            f"hit(s): {verification.reasoning}"
+        )
+        return result
+    canonical = verification.hit
     result.scholar_hit = canonical
 
-    # Cross-check what the original bibitem said vs what Scholar found.
+    # Cross-check what the original bibitem said vs what Scholar found (still useful as
+    # a per-field diff for the report, even though the LLM has already endorsed identity).
     result.discrepancies = _crosscheck(parsed, canonical)
 
     if not canonical.cluster_id:
@@ -202,19 +229,20 @@ async def repair_file(
         return report
 
     repaired_entries: list[dict] = []
-    for i, (key, body) in enumerate(blocks):
-        r = await _repair_one(
-            key,
-            body,
-            headless=headless,
-            openai_model=openai_model,
-            api_key=api_key,
-        )
-        report.results.append(r)
-        if r.new_bibtex_entry is not None:
-            repaired_entries.append(r.new_bibtex_entry)
-        if i < len(blocks) - 1:
-            await asyncio.sleep(delay_seconds)
+    async with scholar.shared_session(headless=headless):
+        for i, (key, body) in enumerate(blocks):
+            r = await _repair_one(
+                key,
+                body,
+                headless=headless,
+                openai_model=openai_model,
+                api_key=api_key,
+            )
+            report.results.append(r)
+            if r.new_bibtex_entry is not None:
+                repaired_entries.append(r.new_bibtex_entry)
+            if i < len(blocks) - 1:
+                await asyncio.sleep(delay_seconds)
 
     if bib_output is not None and repaired_entries:
         db = bibtex.load(bib_output)

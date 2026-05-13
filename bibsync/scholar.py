@@ -11,7 +11,9 @@ visible browser window, then resumes.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import re
+import shutil
 import urllib.parse
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,6 +22,14 @@ from typing import AsyncIterator, Optional
 from platformdirs import user_data_dir
 
 from .models import PaperHit
+
+# Module-level shared browser context, set by ``shared_session``. When set, the
+# search / fetch_versions / fetch_bibtex_for_cluster functions reuse this one
+# context instead of launching a fresh Chromium for each call. This is the
+# difference between Scholar treating us as a normal user vs. a bot.
+_SHARED_CTX: contextvars.ContextVar[Optional[object]] = contextvars.ContextVar(
+    "bibsync_shared_browser_ctx", default=None
+)
 
 SCHOLAR_BASE = "https://scholar.google.com"
 USER_AGENT = (
@@ -31,6 +41,16 @@ USER_AGENT = (
 
 def _profile_dir() -> Path:
     p = Path(user_data_dir("bibsync", "bibsync")) / "chrome-profile"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def reset_profile() -> Path:
+    """Delete the persistent Chrome profile. Use when Scholar has flagged the session
+    and even solving the CAPTCHA doesn't restore search results."""
+    p = _profile_dir()
+    if p.exists():
+        shutil.rmtree(p, ignore_errors=True)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
@@ -54,6 +74,34 @@ async def _browser(headless: bool = False) -> AsyncIterator:
             yield ctx
         finally:
             await ctx.close()
+
+
+@asynccontextmanager
+async def shared_session(headless: bool = False) -> AsyncIterator:
+    """Open one browser context and make it the default for all Scholar calls in this run.
+
+    Without this, every call to :func:`search` / :func:`fetch_versions` /
+    :func:`fetch_bibtex_for_cluster` launches a fresh Chromium — one ``fix`` run can
+    spawn 12+ browsers, which Scholar reads as a bot. With this, the whole run shares
+    one session and looks like a normal user.
+    """
+    async with _browser(headless=headless) as ctx:
+        token = _SHARED_CTX.set(ctx)
+        try:
+            yield ctx
+        finally:
+            _SHARED_CTX.reset(token)
+
+
+@asynccontextmanager
+async def _ctx_or_new(headless: bool) -> AsyncIterator:
+    """Yield the shared context if one is active, otherwise create a one-shot context."""
+    existing = _SHARED_CTX.get()
+    if existing is not None:
+        yield existing
+    else:
+        async with _browser(headless=headless) as ctx:
+            yield ctx
 
 
 async def _await_no_captcha(page, timeout_ms: int = 120_000) -> None:
@@ -160,25 +208,53 @@ def _parse_search_results(html: str) -> list[PaperHit]:
     return hits
 
 
+def _diagnose_empty_result(html: str, query: str) -> str:
+    """When the result parser returns [], inspect the HTML to figure out *why*."""
+    low = html.lower()
+    if "did not match any articles" in low:
+        return "Scholar reports no matching articles."
+    if any(m in low for m in ("captcha", "unusual traffic", "/sorry/", "recaptcha")):
+        return (
+            "Scholar is showing a CAPTCHA / bot-check page. Solve it in the browser "
+            "window and re-run, or `bibsync config` then wipe the profile if it persists."
+        )
+    if "gs_r" not in low:
+        return (
+            "Scholar returned HTML but no expected result containers — your IP may be "
+            "rate-limited or the page layout changed. Try again in a few minutes."
+        )
+    return f"Empty result for {query!r} (no obvious blocker detected)."
+
+
 async def search(query: str, *, headless: bool = False, max_results: int = 10) -> list[PaperHit]:
     """Search Google Scholar for ``query`` and return parsed hits (top page only)."""
     url = f"{SCHOLAR_BASE}/scholar?q={urllib.parse.quote(query)}&hl=en"
-    async with _browser(headless=headless) as ctx:
+    async with _ctx_or_new(headless=headless) as ctx:
         page = await ctx.new_page()
-        await page.goto(url, wait_until="domcontentloaded")
-        await _await_no_captcha(page)
-        html = await page.content()
-        return _parse_search_results(html)[:max_results]
+        try:
+            await page.goto(url, wait_until="domcontentloaded")
+            await _await_no_captcha(page)
+            html = await page.content()
+            hits = _parse_search_results(html)[:max_results]
+            if not hits:
+                # One-line diagnostic so the user knows what kind of empty this is.
+                print(f"[bibsync] {_diagnose_empty_result(html, query)}")
+            return hits
+        finally:
+            await page.close()
 
 
 async def fetch_versions(versions_url: str, *, headless: bool = False) -> list[PaperHit]:
     """Fetch the 'All N versions' page for a paper cluster."""
-    async with _browser(headless=headless) as ctx:
+    async with _ctx_or_new(headless=headless) as ctx:
         page = await ctx.new_page()
-        await page.goto(versions_url, wait_until="domcontentloaded")
-        await _await_no_captcha(page)
-        html = await page.content()
-        return _parse_search_results(html)
+        try:
+            await page.goto(versions_url, wait_until="domcontentloaded")
+            await _await_no_captcha(page)
+            html = await page.content()
+            return _parse_search_results(html)
+        finally:
+            await page.close()
 
 
 async def fetch_bibtex_for_cluster(cluster_id: str, *, headless: bool = False) -> str:
@@ -191,39 +267,42 @@ async def fetch_bibtex_for_cluster(cluster_id: str, *, headless: bool = False) -
 
     # Search-by-cluster gives a single result we can click reliably.
     url = f"{SCHOLAR_BASE}/scholar?cluster={cluster_id}&hl=en"
-    async with _browser(headless=headless) as ctx:
+    async with _ctx_or_new(headless=headless) as ctx:
         page = await ctx.new_page()
-        await page.goto(url, wait_until="domcontentloaded")
-        await _await_no_captcha(page)
-
-        # The cite icon for each result has class gs_or_cit (anchor with onclick).
-        cite_link = page.locator("a.gs_or_cit").first
         try:
-            await cite_link.wait_for(timeout=10_000)
-        except PWTimeout as e:
-            raise RuntimeError(
-                f"Could not find Cite link for cluster {cluster_id}; Scholar layout may have changed."
-            ) from e
-        await cite_link.click()
+            await page.goto(url, wait_until="domcontentloaded")
+            await _await_no_captcha(page)
 
-        # Cite modal contains a BibTeX link.
-        bibtex_link = page.locator("a:has-text('BibTeX')").first
-        await bibtex_link.wait_for(timeout=10_000)
+            # The cite icon for each result has class gs_or_cit (anchor with onclick).
+            cite_link = page.locator("a.gs_or_cit").first
+            try:
+                await cite_link.wait_for(timeout=10_000)
+            except PWTimeout as e:
+                raise RuntimeError(
+                    f"Could not find Cite link for cluster {cluster_id}; Scholar layout may have changed."
+                ) from e
+            await cite_link.click()
 
-        # The BibTeX link opens the .bib endpoint; capture by intercepting the new page or
-        # by following the href.
-        href = await bibtex_link.get_attribute("href")
-        if not href:
-            raise RuntimeError("BibTeX link had no href.")
-        if href.startswith("/"):
-            href = SCHOLAR_BASE + href
+            # Cite modal contains a BibTeX link.
+            bibtex_link = page.locator("a:has-text('BibTeX')").first
+            await bibtex_link.wait_for(timeout=10_000)
 
-        bib_page = await ctx.new_page()
-        await bib_page.goto(href, wait_until="domcontentloaded")
-        await _await_no_captcha(bib_page)
-        text = await bib_page.inner_text("body")
-        await bib_page.close()
-        return text.strip()
+            href = await bibtex_link.get_attribute("href")
+            if not href:
+                raise RuntimeError("BibTeX link had no href.")
+            if href.startswith("/"):
+                href = SCHOLAR_BASE + href
+
+            bib_page = await ctx.new_page()
+            try:
+                await bib_page.goto(href, wait_until="domcontentloaded")
+                await _await_no_captcha(bib_page)
+                text = await bib_page.inner_text("body")
+                return text.strip()
+            finally:
+                await bib_page.close()
+        finally:
+            await page.close()
 
 
 # Convenience sync wrappers ---------------------------------------------------

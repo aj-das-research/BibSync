@@ -224,29 +224,34 @@ async def _search_and_pick(
     plausible_hits.sort(key=lambda t: t[0], reverse=True)
 
     # LLM verification — the safety net that catches title-similar-but-different papers.
-    last_verdict_reason = ""
-    last_confidence = 0.0
-    for title_score, candidate in plausible_hits[:MAX_LLM_CANDIDATES]:
-        verdict = llm.verify_match(entry, candidate, model=model, api_key=api_key)
-        last_verdict_reason = verdict.reasoning
-        last_confidence = verdict.confidence
-        if verdict.same_paper and verdict.confidence >= LLM_CONFIDENCE_FLOOR:
-            return _PickResult(
-                candidate,
-                title_score,
-                "",
-                llm_reasoning=verdict.reasoning,
-                llm_confidence=verdict.confidence,
-            )
+    # Delegated to the universal pick_verified_match agent so fix shares one verification
+    # path with extract, repair, and add.
+    pick = llm.pick_verified_match(
+        entry,
+        [h for _, h in plausible_hits],
+        confidence_floor=LLM_CONFIDENCE_FLOOR,
+        max_candidates=MAX_LLM_CANDIDATES,
+        model=model,
+        api_key=api_key,
+    )
+    if pick.hit is not None:
+        # Find the title score for the accepted hit.
+        accepted_score = next(s for s, h in plausible_hits if h is pick.hit)
+        return _PickResult(
+            pick.hit,
+            accepted_score,
+            "",
+            llm_reasoning=pick.reasoning,
+            llm_confidence=pick.confidence,
+        )
 
-    # All plausible candidates were rejected by the LLM.
     best_score = plausible_hits[0][0]
     return _PickResult(
         None,
         best_score,
-        f"LLM rejected all {len(plausible_hits[:MAX_LLM_CANDIDATES])} top candidate(s)",
-        llm_reasoning=last_verdict_reason,
-        llm_confidence=last_confidence,
+        f"LLM rejected all {pick.candidates_considered} top candidate(s)",
+        llm_reasoning=pick.reasoning,
+        llm_confidence=pick.confidence,
     )
 
 
@@ -382,22 +387,31 @@ async def fix_bib(
     used_keys: set[str] = set()
     new_entries: list[dict] = []
 
-    for i, entry in enumerate(db.entries):
-        result, merged = await _fix_one(
-            entry,
-            headless=headless,
-            regenerate_keys=regenerate_keys,
-            used_keys=used_keys,
-            model=model,
-            api_key=api_key,
-        )
-        report.results.append(result)
-        new_entries.append(merged if merged is not None else entry)
-        if i < len(db.entries) - 1:
-            await asyncio.sleep(delay_seconds)
+    # Pool all Scholar calls for this run into a single browser context so we don't
+    # trigger Scholar's anti-bot heuristics on the 8th-12th launch.
+    async with scholar.shared_session(headless=headless):
+        for i, entry in enumerate(db.entries):
+            result, merged = await _fix_one(
+                entry,
+                headless=headless,
+                regenerate_keys=regenerate_keys,
+                used_keys=used_keys,
+                model=model,
+                api_key=api_key,
+            )
+            report.results.append(result)
+            new_entries.append(merged if merged is not None else entry)
+            if i < len(db.entries) - 1:
+                await asyncio.sleep(delay_seconds)
 
-    db.entries = new_entries
-    bibtex.dump(db, bib_file)
+    # Skip the dump entirely on a no-op run. Otherwise BibTexWriter reorders the file
+    # alphabetically and the user sees diff noise even when nothing semantically changed.
+    any_changed = any(
+        r.status in ("rewritten", "key_renamed") for r in report.results
+    )
+    if any_changed:
+        db.entries = new_entries
+        bibtex.dump(db, bib_file)
 
     renames = report.renames()
     if project_root is not None and renames:

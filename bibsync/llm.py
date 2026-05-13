@@ -448,3 +448,51 @@ def verify_match(
         confidence=float(data.get("confidence") or 0.0),
         reasoning=str(data.get("reasoning") or ""),
     )
+
+
+@dataclass
+class VerifiedPick:
+    """Outcome of :func:`pick_verified_match` — either a Scholar hit the LLM endorsed
+    as the same paper, or ``None`` with a human-readable rejection reason."""
+
+    hit: Optional[PaperHit]
+    confidence: float
+    reasoning: str  # accepted-or-rejected explanation from the last LLM call
+    candidates_considered: int = 0
+
+
+def pick_verified_match(
+    expected: dict,
+    candidates: list[PaperHit],
+    *,
+    confidence_floor: float = 0.7,
+    max_candidates: int = 3,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> VerifiedPick:
+    """Universal LLM-verified match picker, shared by every command that searches Scholar.
+
+    Walks the top ``max_candidates`` of ``candidates`` and asks the LLM judge whether
+    each is the same paper as ``expected`` (a dict with ``title``, ``author``, ``year``
+    keys — only ``title`` is required). Returns the first candidate the LLM accepts with
+    ``confidence >= confidence_floor``, otherwise ``hit=None`` with the LAST rejection
+    reasoning so the caller can surface it to the user.
+
+    Used by ``fix``, ``extract``, ``repair``, and ``add`` to ensure no wrong-paper
+    Scholar hit ever reaches the .bib.
+    """
+    if not candidates:
+        return VerifiedPick(None, 0.0, "no candidates supplied", 0)
+
+    last_reasoning = ""
+    last_confidence = 0.0
+    considered = 0
+    for candidate in candidates[:max_candidates]:
+        considered += 1
+        verdict = verify_match(expected, candidate, model=model, api_key=api_key)
+        last_reasoning = verdict.reasoning
+        last_confidence = verdict.confidence
+        if verdict.same_paper and verdict.confidence >= confidence_floor:
+            return VerifiedPick(candidate, verdict.confidence, verdict.reasoning, considered)
+
+    return VerifiedPick(None, last_confidence, last_reasoning, considered)

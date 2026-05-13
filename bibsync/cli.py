@@ -18,6 +18,7 @@ from . import (
     config as cfg,
     extract as extract_mod,
     fix as fix_mod,
+    llm as llm_mod,
     picker,
     repair as repair_mod,
     scanner,
@@ -135,6 +136,31 @@ def add(
         else picker.pick_canonical(candidates)
     )
     console.print(f"[green]Canonical version:[/green] {canonical.short()}")
+
+    # LLM verification — does this Scholar hit actually match the user's intended title?
+    # Catches the "Attention Is All You Need" → "Is Attention All You Need?" by Mineault
+    # case where Scholar returns only title-similar derivatives of the real paper.
+    llm_cfg = cfg.resolve_llm_config()
+    if llm_cfg is not None:
+        verdict = llm_mod.verify_match(
+            {"title": query, "author": "", "year": ""},
+            canonical,
+            model=openai_model,
+            api_key=llm_cfg.api_key,
+        )
+        if not verdict.same_paper or verdict.confidence < 0.7:
+            console.print(
+                f"[yellow]⚠ LLM thinks this may not match your query[/yellow] "
+                f"[dim](conf={verdict.confidence:.2f})[/dim]"
+            )
+            console.print(f"  [dim]Reasoning:[/dim] {verdict.reasoning}")
+            if not auto:
+                if not click.confirm("Add this entry anyway?", default=False):
+                    console.print("[yellow]Aborted.[/yellow]")
+                    return
+            else:
+                console.print("[red]Refusing to auto-add a low-confidence match. Re-run without --auto to override.[/red]")
+                sys.exit(1)
 
     if not canonical.cluster_id:
         console.print("[red]Selected hit has no cluster id — cannot fetch BibTeX.[/red]")
@@ -553,6 +579,18 @@ def config_group() -> None:
 def config_path_cmd() -> None:
     """Show where the config file lives."""
     console.print(str(cfg.config_path()))
+
+
+@config_group.command(name="reset-profile")
+def config_reset_profile() -> None:
+    """Wipe the persistent Chrome profile used by the Scholar scraper.
+
+    Run this when Scholar has flagged your session and even solving the CAPTCHA
+    doesn't restore results. After resetting, the next run starts fresh — you'll
+    likely see a CAPTCHA on first search, solve it once, and proceed.
+    """
+    path = scholar.reset_profile()
+    console.print(f"[green]Wiped Chrome profile at[/green] {path}")
 
 
 @config_group.command(name="show")
