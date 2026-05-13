@@ -111,21 +111,24 @@ async def _resolve_suggestion(
     )
 
     # Step 1: run each query, merge results, dedupe by cluster_id.
+    # Always run every query — Q1 often returns derivatives; Q2/Q3 (with author or
+    # title-keywords) is frequently the one that surfaces the canonical paper.
+    # Early-break by candidate count was hiding the better queries from the pipeline.
     merged: dict[str, PaperHit] = {}
     for q_idx, query in enumerate(suggestion.queries[:MAX_QUERIES_PER_CLAIM]):
         dbg.trace("suggest.query", f"attempt #{q_idx + 1}", query=query)
         try:
-            hits = await scholar.search(query, headless=headless, max_results=6)
+            hits = await scholar.search(query, headless=headless, max_results=8)
         except Exception as e:
             dbg.trace("suggest.query", "ERR", error=str(e))
             continue
         dbg.trace("suggest.query", f"got {len(hits)} hits")
+        new = 0
         for h in hits:
             if h.cluster_id and h.cluster_id not in merged:
                 merged[h.cluster_id] = h
-        if len(merged) >= 6:
-            # Already have a healthy pool; stop spending queries.
-            break
+                new += 1
+        dbg.trace("suggest.query", "merged", new_candidates=new, total=len(merged))
 
     if not merged:
         result.status = "no_scholar_hit"

@@ -216,39 +216,99 @@ def infer_paper_from_cite_key(
 
 
 _SUGGEST_SYSTEM = """\
-You are an academic citation assistant. The user has a paragraph of LaTeX prose with
-NO citations yet. Your job is to identify each factual claim, named method, named
-system, or attribution that should be cited, and propose 2-3 Google Scholar search
-queries for each — most-specific to broadest — so the caller can find the canonical
-paper even when Scholar's relevance ranking is noisy.
+You identify citation targets in LaTeX prose and produce Google Scholar search
+queries that will surface the CANONICAL ORIGINAL paper for each.
 
-Respond with a single JSON object of the form:
+═══════════════════════════════════════════════════════════════════════════════
+RULE 1 — One suggestion PER NAMED SYSTEM. ABSOLUTELY DO NOT GROUP.
+═══════════════════════════════════════════════════════════════════════════════
+When prose lists multiple named systems/methods/models — e.g. "Med-PaLM, Med-PaLM 2,
+Med-PaLM M, and Med-Gemini" — you MUST emit ONE suggestion FOR EACH NAMED SYSTEM.
+The anchor MUST be just the system name itself, not the surrounding phrase.
+
+WRONG (a single grouped suggestion):
+    {"anchor": "Med-PaLM, Med-PaLM 2, Med-PaLM M, and Med-Gemini approached", ...}
+
+RIGHT (one suggestion per system, anchor = system name only):
+    {"anchor": "Med-PaLM", "queries": [...]},
+    {"anchor": "Med-PaLM 2", "queries": [...]},
+    {"anchor": "Med-PaLM M", "queries": [...]},
+    {"anchor": "Med-Gemini", "queries": [...]}
+
+Same rule for "MedSAM, RETFound, UNI, and Prov-GigaPath" → four suggestions.
+Same rule for "chess, Go, and poker" — if each implies the AI paper(s) for that
+game, emit one suggestion per game with anchor "chess", "Go", "poker".
+
+IMPORTANT: the anchor must be PLAIN TEXT only — DO NOT include any LaTeX commands
+(no \\cite, no \\nocite, no \\textit, no curly braces). Just the verbatim text that
+already exists in the input paragraph. The caller adds \\cite{} separately.
+
+═══════════════════════════════════════════════════════════════════════════════
+RULE 1b — What counts as a citation target
+═══════════════════════════════════════════════════════════════════════════════
+Cite when the prose attributes any of:
+  • A named SYSTEM / MODEL ("Med-PaLM 2", "RETFound", "Prov-GigaPath", "BERT")
+  • A named ALGORITHM / TECHNIQUE ("attention mechanism", "equilibrium search
+    methods", "RLHF", "Monte Carlo tree search")
+  • A specific QUANTITATIVE CLAIM that comes from a particular paper
+    (e.g., "exceed 10^64 possible choices per turn" → cite the source paper)
+  • A named GAME / DOMAIN being studied at the AI-research level
+    ("chess" implies AlphaZero / Deep Blue; "Go" implies AlphaGo;
+     "poker" implies Libratus / Pluribus; "Diplomacy" implies Cicero / DeepMind no-press)
+  • A NAMED PARADIGM or finding ("pretraining-then-finetuning paradigm" → BERT;
+    "scale alone could unlock emergent capabilities" → GPT-3 / Wei et al. emergent)
+  • A foundational result attributed to specific authors / years
+
+When in doubt for a domain-establishing claim, EMIT a suggestion — the caller
+will reject candidates that don't actually support the claim. Missing a
+citable claim is worse than proposing one that gets filtered.
+
+═══════════════════════════════════════════════════════════════════════════════
+RULE 2 — Queries must look like ACTUAL PAPER TITLES, not concept paraphrases.
+═══════════════════════════════════════════════════════════════════════════════
+Scholar's relevance ranking rewards keyword overlap with paper titles. A
+conceptual query like "BERT pretraining-then-finetuning paradigm" finds surveys.
+A title-like query like "BERT Pre-training Deep Bidirectional Transformers Devlin"
+finds the actual BERT paper.
+
+For each system/claim, produce 2-3 queries:
+  - Q1: A title-like search that includes the SYSTEM NAME plus likely keywords
+        from the canonical paper title.
+  - Q2: SURNAME + YEAR + SYSTEM NAME (if you can guess the first author).
+  - Q3: Distinctive descriptive phrase from the original paper (fallback).
+
+GOOD query examples (find canonical papers):
+  - "Attention Is All You Need Vaswani transformer"
+  - "BERT Pre-training Deep Bidirectional Transformers Devlin"
+  - "Language Models are Few-Shot Learners Brown GPT-3"
+  - "Segment Anything in Medical Images Ma MedSAM"
+  - "RETFound foundation model retinal images Zhou Nature"
+  - "Prov-GigaPath whole-slide pathology foundation model"
+
+BAD query examples (find surveys/reviews/derivatives — DON'T DO THIS):
+  - "Attention mechanism transformer architecture"     ← too conceptual
+  - "BERT pretraining-then-finetuning paradigm"        ← describes effect
+  - "GPT-style decoder-only models emergent capabilities" ← paraphrase
+  - "MedSAM imaging model 2023"                        ← too generic
+
+═══════════════════════════════════════════════════════════════════════════════
+Response format
+═══════════════════════════════════════════════════════════════════════════════
+Return a single JSON object:
   {"suggestions": [
       {
-        "queries": [
-          "specific paper-title-like query (best for exact-paper search)",
-          "second query: e.g. '<first author surname> <year> <system name>'",
-          "third query: broader topic phrasing (fallback)"
-        ],
-        "anchor": "verbatim substring (5-20 words) from the input paragraph; \\cite{} will be inserted RIGHT AFTER this substring. Must be an exact substring.",
-        "reason": "one sentence explaining why this attribution needs a citation",
-        "expected_first_author": "surname guess if you have one, else null",
+        "queries": ["title-like query", "<author> <year> <system>", "fallback"],
+        "anchor": "EXACT substring of the input paragraph — usually just the
+                   system name. \\cite{} is inserted RIGHT AFTER this substring.",
+        "reason": "one sentence on why this needs a citation",
+        "expected_first_author": "surname guess or null",
         "expected_year": 2023
       },
       ...
   ]}
 
-Rules:
-  * Only flag GENUINE attributions: named methods ("Med-PaLM", "RETFound"), specific
-    systems, quantitative claims, foundational works, or named results. Do NOT cite
-    generic methodology phrases like "we propose" or "we evaluate".
-  * One citation per distinct system/claim. Multiple systems named in one sentence
-    each get their own suggestion.
-  * For ``queries``, provide 2-3 angles. Examples for a Med-PaLM 2 claim:
-      ["Med-PaLM 2 large language model medicine",
-       "Singhal Med-PaLM 2 Google",
-       "Med-PaLM 2 USMLE expert-level"]
-  * If the paragraph has NO claims needing citation, return JSON {"suggestions": []}.
+If the paragraph has NO genuine attributions needing citation (pure narrative,
+methods boilerplate), return JSON {"suggestions": []}.
 """
 
 
@@ -288,6 +348,14 @@ def suggest_citations(
             single = (s.get("query") or "").strip()
             queries = [single] if single else []
         anchor = (s.get("anchor") or "").strip()
+        # Sanitise the anchor: LLM sometimes hallucinates \nocite{}, \cite{}, \textit{},
+        # or stray braces into the anchor. Strip any \xxx{...} command sequences plus
+        # leftover backslashes and braces, so the anchor stays plain text we can find
+        # as a substring of the user's actual paragraph.
+        anchor = re.sub(r"\\[a-zA-Z]+\*?\s*(?:\[[^\]]*\])?\s*\{[^}]*\}", "", anchor)
+        anchor = re.sub(r"\\[a-zA-Z]+\*?", "", anchor)
+        anchor = anchor.replace("{", "").replace("}", "").strip()
+        anchor = re.sub(r"\s+", " ", anchor).strip()
         if not queries or not anchor:
             continue
         year_val = s.get("expected_year")
@@ -532,34 +600,53 @@ class ClaimSupport:
 
 
 _CLAIM_SUPPORT_SYSTEM = """\
-You are an academic citation expert. The user has a CLAIM written in their paper
-and a CANDIDATE paper found via Google Scholar. Decide whether the CANDIDATE is the
-RIGHT paper to cite for this claim.
+You are a citation expert. Decide whether a CANDIDATE paper from Google Scholar is
+the RIGHT paper to cite for a CLAIM in academic prose.
 
-ACCEPT (supports=true) when the CANDIDATE is the CANONICAL ORIGINAL paper that
-established / introduced / proposed the thing the claim attributes:
-  - Original introductions of named methods/systems (the Med-PaLM 2 paper for a
-    Med-PaLM 2 claim; the BERT paper for a BERT claim).
-  - The foundational paper for an attributed result or technique.
-  - Highly cited works in the relevant field/year that match the claim's subject.
+ACCEPT (supports=true) when ANY of these hold (each is sufficient on its own):
 
-REJECT (supports=false) when the CANDIDATE is:
-  - A DERIVATIVE work: survey, review, retrospective, book chapter, or "Applications
-    of X" paper.
-  - A FOLLOW-UP that builds on but doesn't introduce the named thing.
-  - A paper on a DIFFERENT topic that just shares keywords with the claim.
-  - A paper whose authors / year are wildly implausible for the attribution.
+  A. The CANDIDATE is the canonical work that INTRODUCED the named system / method
+     / dataset the CLAIM attributes. The paper's title need NOT literally contain
+     the system name — many canonical papers describe the system as "a foundation
+     model for X" rather than naming it in the title. Example: the Prov-GigaPath
+     paper is titled "A whole-slide foundation model for digital pathology" — that
+     IS the right paper to cite for any claim about Prov-GigaPath.
 
-When uncertain and the candidate has a high citation count and a topic-matching title,
-ACCEPT. False rejections force the caller to retry; a missed citation is recoverable.
-But when the candidate is clearly a derivative (titles like "A survey of X" or
-"Applications of X"), REJECT firmly.
+  B. The CANDIDATE has VERY HIGH citation count (cited_by ≥ 500) AND topic-matches
+     the claim. High citation count + topic match is overwhelming evidence of
+     canonicality; derivatives almost never reach 500+ citations.
+
+  C. The CANDIDATE clearly introduces a named result that the claim attributes,
+     and the author / year / venue are plausible.
+
+REJECT (supports=false) when ANY of these hold:
+
+  X. The CANDIDATE is an EXPLICIT VERSION VARIANT. If the claim names "MedSAM" and
+     the CANDIDATE title is "Medical SAM 2", "MedSAM 2", "MedSAM v2", or similar
+     "X 2" / "X+" — REJECT. A sequel is a different paper. Same goes for
+     "BERT" vs "RoBERTa", "GPT" vs "GPT-2", etc. UNLESS the claim explicitly
+     references the variant.
+
+  Y. The CANDIDATE is a SURVEY, REVIEW, retrospective, comprehensive overview, or
+     book chapter, AND there is no indication this is the ORIGINAL work.
+     Title signals: "A survey of", "A review of", "Comprehensive analysis of",
+     "Applications of X in Y", "An overview of".
+
+  Z. The CANDIDATE evaluates / replicates / extends another work and is NOT itself
+     the foundational introduction. Title signals: "Independent evaluation of X",
+     "Replicability of X", "Assessing X", "Extending X to Y".
+
+  W. The CANDIDATE is on a clearly different topic (only superficial keyword overlap).
+
+Heuristic priority: A and B together are STRONG accept signals — when a paper has
+both high citation count and clear topic match, accept even if the title doesn't
+contain the named system literally. When in doubt with cited_by ≥ 500, ACCEPT.
 
 Return a single JSON object:
   {
     "supports": true | false,
     "confidence": 0.0 to 1.0,
-    "reasoning": "one short sentence — name the original / derivative signal"
+    "reasoning": "one short sentence — name the specific accept (A/B/C) or reject (X/Y/Z/W) signal"
   }
 """
 
