@@ -366,8 +366,12 @@ REJECT IMMEDIATELY (same_paper=false) if ANY of these is true:
       Examples of REJECT: "Vaswani" vs "Mineault", "Moor" vs "Di", "Goodfellow" vs
       "Labaca-Castro", "Singhal" vs "Kanjilal".
 
-  R2. The CANDIDATE's year is more than ±2 from the ORIGINAL's year (preprint→proceedings
-      drift is at most ~2 years; anything beyond is a different paper).
+  R2. The CANDIDATE's year differs from the ORIGINAL's year by MORE THAN 3
+      (i.e., abs(candidate_year - original_year) > 3). The arXiv → conference →
+      journal → republished-chapter drift can span up to 3 years and the candidate
+      may still be the SAME paper. ONLY reject when the gap is strictly larger
+      than 3 years. Years that are exactly equal, or differ by 1, 2, or 3, are
+      ACCEPTABLE on this dimension.
 
   R3. The CANDIDATE is a DERIVATIVE work, not the ORIGINAL itself. Reject if the
       CANDIDATE title contains words like:
@@ -385,7 +389,7 @@ REJECT IMMEDIATELY (same_paper=false) if ANY of these is true:
 ACCEPT (same_paper=true) ONLY if ALL of these hold:
 
   A1. First-author surnames match (per R1).
-  A2. Years agree within ±2 (per R2).
+  A2. Years agree within ±3 (per R2).
   A3. CANDIDATE title is semantically the same paper as ORIGINAL (minor
       punctuation/case/order differences OK; substantive title changes are NOT OK).
   A4. CANDIDATE is the ORIGINAL paper, not a derivative work (per R3).

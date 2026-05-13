@@ -393,7 +393,8 @@ def fix_cmd(
     t.add_column("Original key", style="bold")
     t.add_column("New key")
     t.add_column("Status")
-    t.add_column("Title sim", justify="right")
+    t.add_column("Sim", justify="right")
+    t.add_column("Scholar candidate", overflow="fold")
     t.add_column("LLM verdict")
     t.add_column("Field changes / note")
     status_styles = {
@@ -410,11 +411,22 @@ def fix_cmd(
             verdict = f"[dim]conf={r.llm_confidence:.2f}[/dim]\n{r.llm_reasoning}"
         else:
             verdict = "—"
+        if r.scholar_hit:
+            authors = ", ".join(r.scholar_hit.authors[:2])
+            if len(r.scholar_hit.authors) > 2:
+                authors += " et al."
+            candidate_cell = (
+                f"{r.scholar_hit.title}\n"
+                f"[dim]{authors} · {r.scholar_hit.year or '?'} · cited={r.scholar_hit.cited_by}[/dim]"
+            )
+        else:
+            candidate_cell = "—"
         t.add_row(
             r.original_key,
             new_key,
             status_styles.get(r.status, r.status),
             f"{r.title_similarity:.0f}" if r.title_similarity else "—",
+            candidate_cell,
             verdict,
             changes,
         )

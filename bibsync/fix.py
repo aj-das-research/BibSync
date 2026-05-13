@@ -30,7 +30,7 @@ from . import bibtex, llm, scholar, tex_rewrite
 from .models import PaperHit
 
 LLM_CONFIDENCE_FLOOR = 0.7  # LLM verdict must be at least this confident to accept a match
-MAX_LLM_CANDIDATES = 3      # check at most this many top heuristic-plausible hits with the LLM
+MAX_LLM_CANDIDATES = 5      # check at most this many top heuristic-plausible hits with the LLM
 
 
 @dataclass
@@ -129,7 +129,13 @@ def _is_plausible_match(entry: dict, hit: PaperHit) -> tuple[bool, str]:
 
 
 def _build_refined_query(entry: dict) -> Optional[str]:
-    """Combine title + first-author surname + year for a tighter Scholar search."""
+    """Combine title + first-author surname for a tighter Scholar search.
+
+    Year is intentionally OMITTED: the whole reason we're running ``fix`` is that
+    the user's bib may have wrong metadata, including wrong years. Passing a wrong
+    year into the search query biases Scholar toward derivative-era results and
+    actively hides the canonical paper from us.
+    """
     title = re.sub(r"[{}\\]", "", entry.get("title", "")).strip()
     if not title:
         return None
@@ -137,9 +143,6 @@ def _build_refined_query(entry: dict) -> Optional[str]:
     surname = _first_author_surname(entry.get("author", ""))
     if surname:
         parts.append(surname)
-    year = _bib_year(entry)
-    if year:
-        parts.append(str(year))
     return " ".join(parts)
 
 
@@ -221,7 +224,15 @@ async def _search_and_pick(
         top_score, _, (_, reason) = scored[0]
         return _PickResult(None, top_score, reason or f"title sim only {top_score:.0f}%")
 
-    plausible_hits.sort(key=lambda t: t[0], reverse=True)
+    # Sort by citation count (DESC) THEN title similarity (DESC). Citation count is
+    # the strongest single signal that a candidate is the ORIGINAL paper — derivative
+    # chapters/reviews of foundational papers rarely exceed a few hundred citations,
+    # while the originals typically have 10k–100k. So the most-cited heuristic-plausible
+    # candidate is almost always the canonical entry we want to verify first.
+    plausible_hits.sort(
+        key=lambda t: ((t[1].cited_by or 0), t[0]),
+        reverse=True,
+    )
 
     # LLM verification — the safety net that catches title-similar-but-different papers.
     # Delegated to the universal pick_verified_match agent so fix shares one verification
