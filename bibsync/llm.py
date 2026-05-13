@@ -277,6 +277,10 @@ For each system/claim, produce 2-3 queries:
   - Q2: SURNAME + YEAR + SYSTEM NAME (if you can guess the first author).
   - Q3: Distinctive descriptive phrase from the original paper (fallback).
 
+(The caller automatically prepends two deterministic queries — `"<anchor>" original
+paper` and `"<anchor>"` — so do NOT include those literal patterns. Your queries
+should add additional angles the deterministic queries miss.)
+
 GOOD query examples (find canonical papers):
   - "Attention Is All You Need Vaswani transformer"
   - "BERT Pre-training Deep Bidirectional Transformers Devlin"

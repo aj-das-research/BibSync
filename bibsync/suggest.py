@@ -23,11 +23,38 @@ from typing import Optional
 from . import bibtex, dbg, llm, picker, scholar, tex_rewrite
 from .models import PaperHit
 
-# Try at most this many queries per claim, and at most this many top candidates
-# (sorted by cited_by) per claim when asking the LLM "does this support the claim?".
-MAX_QUERIES_PER_CLAIM = 3
-MAX_CANDIDATES_PER_CLAIM = 4
+# Per-claim caps: includes both deterministic canonical queries (see
+# _canonical_paper_queries) and the LLM-proposed queries. 5 = 2 canonical + 3 LLM.
+MAX_QUERIES_PER_CLAIM = 5
+MAX_CANDIDATES_PER_CLAIM = 5
 CLAIM_SUPPORT_CONFIDENCE_FLOOR = 0.7
+
+# Anchors longer than this (word count) are NOT used as a quoted-phrase query.
+# Quoting "the attention mechanism that displaced recurrence" yields too few results;
+# quoting short named-system anchors like "MedSAM" or "Med-PaLM 2" is exactly right.
+MAX_ANCHOR_WORDS_FOR_QUOTED_QUERY = 6
+
+
+def _canonical_paper_queries(anchor: str) -> list[str]:
+    """Return deterministic Scholar queries that target the CANONICAL paper for a
+    short named-system anchor.
+
+    The pattern ``"<name>" original paper`` is a well-known manual technique
+    (quotes force literal match on the system name; "original paper" downranks
+    surveys / reviews / applications). We prepend these in front of whatever
+    queries the LLM proposed.
+    """
+    anchor = anchor.strip()
+    if not anchor:
+        return []
+    word_count = len(anchor.split())
+    if word_count == 0 or word_count > MAX_ANCHOR_WORDS_FOR_QUOTED_QUERY:
+        return []
+    quoted = f'"{anchor}"'
+    return [
+        f"{quoted} original paper",
+        quoted,
+    ]
 
 _PARA_BOUNDARY = re.compile(r"\n\s*\n")
 _CITE_PRESENCE_RE = re.compile(r"\\(?:no)?cite\w*\s*(?:\[[^\]]*\])*\s*\{")
@@ -136,11 +163,20 @@ async def _resolve_suggestion(
         reason=suggestion.reason,
     )
 
+    # Build the final query list: deterministic canonical-paper queries FIRST
+    # (highest-recall for short named-system anchors), then the LLM-proposed queries.
+    canonical_qs = _canonical_paper_queries(suggestion.anchor)
+    all_queries: list[str] = list(canonical_qs)
+    for q in suggestion.queries:
+        if q and q not in all_queries:
+            all_queries.append(q)
+
     dbg.trace(
         "suggest.resolve",
         "start",
         anchor=suggestion.anchor,
-        queries=suggestion.queries,
+        canonical_queries=canonical_qs,
+        llm_queries=suggestion.queries,
         para=paragraph_idx,
     )
 
@@ -149,7 +185,7 @@ async def _resolve_suggestion(
     # title-keywords) is frequently the one that surfaces the canonical paper.
     # Early-break by candidate count was hiding the better queries from the pipeline.
     merged: dict[str, PaperHit] = {}
-    for q_idx, query in enumerate(suggestion.queries[:MAX_QUERIES_PER_CLAIM]):
+    for q_idx, query in enumerate(all_queries[:MAX_QUERIES_PER_CLAIM]):
         dbg.trace("suggest.query", f"attempt #{q_idx + 1}", query=query)
         try:
             hits = await scholar.search(query, headless=headless, max_results=8)
@@ -166,7 +202,10 @@ async def _resolve_suggestion(
 
     if not merged:
         result.status = "no_scholar_hit"
-        result.note = f"no Scholar results across {len(suggestion.queries)} querie(s)"
+        result.note = (
+            f"no Scholar results across {min(len(all_queries), MAX_QUERIES_PER_CLAIM)} "
+            f"queries (incl. canonical-paper pattern)"
+        )
         dbg.trace("suggest.resolve", "no candidates from any query")
         return result, None
 
