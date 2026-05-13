@@ -137,21 +137,46 @@ async def _await_no_captcha(page, timeout_ms: int = 120_000) -> None:
 def _parse_search_results(html: str) -> list[PaperHit]:
     """Parse the result list from a Scholar search page.
 
-    Uses regex rather than a full HTML parser so we don't need BeautifulSoup as a dep,
-    and the structure of Scholar result rows is stable enough for this.
+    Designed to survive Scholar HTML drift:
+      * Class string is matched lenient — any ``<div>`` with the word ``gs_r`` in its
+        class list and a ``data-cid`` attribute, in either attribute order.
+      * Block boundary is the start of the NEXT result, not a fixed closing pattern.
+        This avoids the failure mode where extra nested divs broke the old regex's
+        ``</div>\\s*</div>\\s*</div>`` terminator.
     """
     hits: list[PaperHit] = []
 
-    # Each result is a div.gs_r.gs_or.gs_scl with a data-cid (cluster id).
+    # Find every result-block start position + cluster id, regardless of whether
+    # data-cid appears before or after the class attribute.
+    starts: list[tuple[int, str]] = []
     for m in re.finditer(
-        r'<div class="gs_r gs_or gs_scl"[^>]*?data-cid="([^"]+)"[^>]*>(.*?)</div>\s*</div>\s*</div>',
+        r'<div\s+[^>]*\bclass="[^"]*\bgs_r\b[^"]*"[^>]*\bdata-cid="([^"]+)"',
         html,
-        flags=re.DOTALL,
     ):
-        cluster_id = m.group(1)
-        block = m.group(2)
+        starts.append((m.start(), m.group(1)))
+    for m in re.finditer(
+        r'<div\s+[^>]*\bdata-cid="([^"]+)"[^>]*\bclass="[^"]*\bgs_r\b[^"]*"',
+        html,
+    ):
+        starts.append((m.start(), m.group(1)))
 
-        title_m = re.search(r'<h3 class="gs_rt"[^>]*>(.*?)</h3>', block, flags=re.DOTALL)
+    # De-duplicate by start offset and sort in document order.
+    seen_offsets: set[int] = set()
+    ordered: list[tuple[int, str]] = []
+    for off, cid in sorted(starts):
+        if off not in seen_offsets:
+            seen_offsets.add(off)
+            ordered.append((off, cid))
+
+    for i, (start, cluster_id) in enumerate(ordered):
+        end = ordered[i + 1][0] if i + 1 < len(ordered) else len(html)
+        block = html[start:end]
+
+        title_m = re.search(
+            r'<h3\s+[^>]*\bclass="[^"]*\bgs_rt\b[^"]*"[^>]*>(.*?)</h3>',
+            block,
+            flags=re.DOTALL,
+        )
         if not title_m:
             continue
         title_html = title_m.group(1)
@@ -159,8 +184,11 @@ def _parse_search_results(html: str) -> list[PaperHit]:
         title = re.sub(r"\s+", " ", title).replace("[PDF]", "").replace("[HTML]", "").strip()
         title = title.lstrip("[").rstrip("]").strip()
 
-        # gs_a: "Author1, Author2 - Venue, Year - publisher.com"
-        authors_block_m = re.search(r'<div class="gs_a"[^>]*>(.*?)</div>', block, flags=re.DOTALL)
+        authors_block_m = re.search(
+            r'<div\s+[^>]*\bclass="[^"]*\bgs_a\b[^"]*"[^>]*>(.*?)</div>',
+            block,
+            flags=re.DOTALL,
+        )
         authors: list[str] = []
         year: Optional[int] = None
         venue: Optional[str] = None
@@ -171,7 +199,6 @@ def _parse_search_results(html: str) -> list[PaperHit]:
             if parts:
                 authors = [a.strip() for a in parts[0].split(",") if a.strip()]
             if len(parts) >= 2:
-                # "Venue, Year" or just "Year"
                 middle = parts[1]
                 year_m = re.search(r"\b(19|20)\d{2}\b", middle)
                 if year_m:
@@ -180,16 +207,22 @@ def _parse_search_results(html: str) -> list[PaperHit]:
                 venue = venue_part or None
 
         cited_by = 0
-        cited_m = re.search(r'Cited by (\d+)', block)
+        cited_m = re.search(r"Cited by (\d+)", block)
         if cited_m:
             cited_by = int(cited_m.group(1))
 
         versions_url: Optional[str] = None
-        versions_m = re.search(r'href="(/scholar\?cluster=[^"]+)"[^>]*>\s*All\s*(\d+)\s*versions', block)
+        versions_m = re.search(
+            r'href="(/scholar\?cluster=[^"]+)"[^>]*>\s*All\s*(\d+)\s*versions', block
+        )
         if versions_m:
             versions_url = SCHOLAR_BASE + versions_m.group(1).replace("&amp;", "&")
 
-        snippet_m = re.search(r'<div class="gs_rs"[^>]*>(.*?)</div>', block, flags=re.DOTALL)
+        snippet_m = re.search(
+            r'<div\s+[^>]*\bclass="[^"]*\bgs_rs\b[^"]*"[^>]*>(.*?)</div>',
+            block,
+            flags=re.DOTALL,
+        )
         snippet = None
         if snippet_m:
             snippet = re.sub(r"<[^>]+>", "", snippet_m.group(1)).strip()
@@ -242,19 +275,77 @@ def consecutive_empty_count() -> int:
     return _CONSECUTIVE_EMPTY_COUNT.get()
 
 
+def _debug_html_path() -> Path:
+    """Where we save the last 0-hits page for inspection."""
+    return Path(user_data_dir("bibsync", "bibsync")) / "last-empty-search.html"
+
+
+async def _save_debug_html(html: str, query: str) -> None:
+    """Persist the raw HTML of a 0-hit search so the user can inspect what Scholar returned."""
+    try:
+        p = _debug_html_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        header = f"<!-- query: {query} -->\n"
+        p.write_text(header + html, encoding="utf-8")
+        print(f"[bibsync] Saved page HTML for inspection: {p}")
+    except OSError:
+        pass
+
+
 async def search(query: str, *, headless: bool = False, max_results: int = 10) -> list[PaperHit]:
-    """Search Google Scholar for ``query`` and return parsed hits (top page only)."""
-    url = f"{SCHOLAR_BASE}/scholar?q={urllib.parse.quote(query)}&hl=en"
+    """Search Google Scholar by *typing into the search box*, then waiting for results.
+
+    This mimics a real user session: land on the home page, focus the search box,
+    type the query with per-keystroke delays, press Enter, then wait for either a
+    result container OR a "no results" alert OR a CAPTCHA to appear before reading
+    the HTML. The combination of human-paced input + proper wait condition
+    dramatically reduces the "page returned but no results parsed" failure mode.
+    """
     async with _ctx_or_new(headless=headless) as ctx:
         page = await ctx.new_page()
         try:
-            await page.goto(url, wait_until="domcontentloaded")
+            # 1. Land on the Scholar home page. Looks more natural than navigating
+            #    straight to /scholar?q=... and gives the search box a moment to bind.
+            await page.goto(f"{SCHOLAR_BASE}/", wait_until="domcontentloaded")
             await _await_no_captcha(page)
+
+            # 2. Find the search box and type the query (with key delays).
+            #    Scholar's input is name="q" (top bar) — fall back to selector if needed.
+            search_box = page.locator("input[name='q']").first
+            try:
+                await search_box.wait_for(timeout=10_000)
+            except Exception:
+                # Couldn't find search box on home — fall back to direct URL.
+                await page.goto(
+                    f"{SCHOLAR_BASE}/scholar?q={urllib.parse.quote(query)}&hl=en",
+                    wait_until="domcontentloaded",
+                )
+            else:
+                await search_box.fill("")  # clear any prior text
+                await search_box.type(query, delay=35)  # ~35ms/key ≈ human typing speed
+                await search_box.press("Enter")
+
+            # 3. Wait for results to render. Scholar fills #gs_res_ccl with .gs_r
+            #    divs once results are ready; .gs_alrt is the "no results" message;
+            #    captcha forms also appear here.
+            try:
+                await page.wait_for_selector(
+                    "div.gs_r, .gs_alrt, form#gs_captcha_f",
+                    timeout=15_000,
+                )
+            except Exception:
+                pass  # Continue with whatever we have
+
+            await _await_no_captcha(page)
+
+            # 4. Small jitter — let any deferred JS hydrate.
+            await asyncio.sleep(0.6)
+
             html = await page.content()
             hits = _parse_search_results(html)[:max_results]
             if not hits:
-                # One-line diagnostic so the user knows what kind of empty this is.
                 print(f"[bibsync] {_diagnose_empty_result(html, query)}")
+                await _save_debug_html(html, query)
                 _CONSECUTIVE_EMPTY_COUNT.set(_CONSECUTIVE_EMPTY_COUNT.get() + 1)
             else:
                 _CONSECUTIVE_EMPTY_COUNT.set(0)
@@ -270,6 +361,13 @@ async def fetch_versions(versions_url: str, *, headless: bool = False) -> list[P
         try:
             await page.goto(versions_url, wait_until="domcontentloaded")
             await _await_no_captcha(page)
+            try:
+                await page.wait_for_selector(
+                    "div.gs_r, .gs_alrt, form#gs_captcha_f", timeout=10_000
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
             html = await page.content()
             return _parse_search_results(html)
         finally:
@@ -291,6 +389,12 @@ async def fetch_bibtex_for_cluster(cluster_id: str, *, headless: bool = False) -
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await _await_no_captcha(page)
+            # Make sure the result row is rendered before we hunt for the cite link.
+            try:
+                await page.wait_for_selector("div.gs_r", timeout=10_000)
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
 
             # The cite icon for each result has class gs_or_cit (anchor with onclick).
             cite_link = page.locator("a.gs_or_cit").first
