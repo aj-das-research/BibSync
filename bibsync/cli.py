@@ -269,6 +269,16 @@ def suggest_cmd(
             f"[bold]Suggestion #{suggestion_n[0]} · Paragraph {result.paragraph_index}[/bold]"
         )
         console.print(f"  [cyan]Anchor:[/cyan] {result.anchor!r}")
+        # Show the LLM's identification (world-knowledge guess at the canonical paper)
+        # so the user can compare it against Scholar's actual hit.
+        ident = getattr(result, "identification", None)
+        if ident and ident.expected_title:
+            year_str = str(ident.expected_year) if ident.expected_year else "?"
+            console.print(
+                f"  [magenta]LLM identified:[/magenta] {ident.expected_title!r}"
+                f" — {ident.expected_first_author or '?'} {year_str}"
+                f" [dim]({ident.expected_venue or '?'}, conf={ident.confidence:.2f})[/dim]"
+            )
         console.print(f"  [cyan]Query:[/cyan]  {result.query}")
         console.print(f"  [cyan]Reason:[/cyan] {result.reason}")
         if scholar_hit:

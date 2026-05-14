@@ -594,6 +594,178 @@ def verify_match(
 
 
 @dataclass
+class IdentifiedPaper:
+    """The LLM's best guess at the canonical paper for a citation anchor, using its
+    training-data knowledge plus the surrounding document context.
+
+    Returned by :func:`identify_canonical_paper`. The Scholar search uses
+    ``expected_title`` + ``expected_first_author`` as a near-deterministic query —
+    far more reliable than topic-guessing queries.
+    """
+
+    expected_title: str
+    expected_first_author: Optional[str] = None
+    expected_year: Optional[int] = None
+    expected_venue: Optional[str] = None
+    arxiv_id: Optional[str] = None
+    confidence: float = 0.0  # 0.0 - 1.0
+    reasoning: str = ""
+
+
+_IDENTIFY_PAPER_SYSTEM = """\
+You are an academic-citation expert with broad knowledge of ML, AI, medical AI,
+NLP, vision, systems, and related research literature. The user is writing a paper
+and needs to cite a specific named system / method / dataset / claim from their prose.
+
+YOUR JOB: identify the SPECIFIC CANONICAL paper that should be cited.
+
+You will receive:
+  • CLAIM — a short anchor phrase (e.g. "UNI", "Med-PaLM 2", "Cicero", "attention mechanism")
+  • PARAGRAPH — the local sentence/paragraph where the claim appears
+  • DOCUMENT — an excerpt of the surrounding paper to disambiguate ambiguous anchors
+
+Use your TRAINING-DATA WORLD KNOWLEDGE to name the canonical paper. The DOCUMENT
+context helps disambiguate (e.g. "UNI" inside a pathology-foundation-models list
+means Chen et al. 2024 Nature Medicine, not "University of Northern Iowa").
+
+Return JSON:
+  {
+    "expected_title": "the actual paper title (your best guess from world knowledge)",
+    "expected_first_author": "surname of the first author (e.g. 'Chen', 'Devlin', 'Vaswani')",
+    "expected_year": 2024,
+    "expected_venue": "Nature Medicine / NeurIPS / ICML / arXiv / ...",
+    "arxiv_id": "2307.14334 if you know it, else null",
+    "confidence": 0.0 to 1.0,
+    "reasoning": "one sentence — what tells you this is the right paper"
+  }
+
+WORKED EXAMPLES:
+
+  CLAIM "UNI" + pathology FM context →
+    title    : "Towards a general-purpose foundation model for computational pathology"
+    author   : "Chen"   year : 2024   venue : "Nature Medicine"
+    conf     : 0.95
+    reason   : "UNI is the foundation model from Mahmood lab introduced in Chen et al. 2024"
+
+  CLAIM "BERT" + language model pretraining context →
+    title    : "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding"
+    author   : "Devlin"  year : 2019  venue : "NAACL"  conf : 1.0
+
+  CLAIM "Med-Gemini" + medical LLM context →
+    title    : "Capabilities of Gemini models in medicine"
+    author   : "Saab"   year : 2024  venue : "arXiv"  arxiv_id : "2404.18416"  conf : 0.9
+    reason   : "Saab et al. 2024 from Google DeepMind introduced the Med-Gemini family"
+
+  CLAIM "attention mechanism" + transformer/sequence-modeling context →
+    title    : "Attention Is All You Need"
+    author   : "Vaswani"  year : 2017  venue : "NeurIPS"  conf : 0.95
+    reason   : "Canonical paper for self-attention displacing recurrence is Vaswani 2017"
+
+  CLAIM "Cicero" + Diplomacy AI context →
+    title    : "Human-level play in the game of Diplomacy by combining language models with strategic reasoning"
+    author   : "Bakhtin"  year : 2022  venue : "Science"  conf : 0.95
+
+When you are NOT confident (very recent paper, ambiguous acronym you can't disambiguate
+even with context, or a generic phrase that doesn't map to a specific paper), return
+a low confidence (<0.4) and pick the BEST guess you have. The caller will verify via
+Scholar search and may fall back to topic-only queries.
+
+Do NOT make up titles or authors with high confidence. Better to return a guess with
+confidence 0.3 than a hallucinated specific title with confidence 0.9.
+"""
+
+
+def identify_canonical_paper(
+    claim: str,
+    paragraph: str,
+    document_context: str = "",
+    *,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> IdentifiedPaper:
+    """Ask the LLM to name the canonical paper for a citation anchor from world knowledge.
+
+    The returned ``expected_title`` is used to build a targeted Scholar search query;
+    the other fields are used to cross-verify Scholar's top result.
+    """
+    try:
+        client, model_id = _get_client_and_model(api_key, model)
+    except Exception as e:
+        dbg.trace("llm.identify", "ERR client unavailable", error=str(e))
+        return IdentifiedPaper(expected_title="", confidence=0.0, reasoning=f"LLM unavailable: {e}")
+
+    dbg.trace("llm.identify", "calling", model=model_id, claim=claim)
+
+    # Cap context lengths to keep the prompt bounded.
+    paragraph_excerpt = paragraph[:1200]
+    doc_excerpt = document_context[:3500] if document_context else ""
+
+    user_msg = (
+        f"CLAIM (anchor phrase to cite): {claim!r}\n\n"
+        f"PARAGRAPH (where the claim appears):\n{paragraph_excerpt}\n\n"
+        f"DOCUMENT CONTEXT (excerpt of the surrounding paper):\n{doc_excerpt}\n\n"
+        "Identify the canonical paper. Return JSON."
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": _IDENTIFY_PAPER_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        return IdentifiedPaper(
+            expected_title="", confidence=0.0, reasoning=f"LLM call failed: {e}"
+        )
+
+    content = _safe_extract_content(resp)
+    if not content:
+        return IdentifiedPaper(expected_title="", confidence=0.0, reasoning="no LLM response")
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return IdentifiedPaper(
+            expected_title="", confidence=0.0, reasoning="LLM did not return valid JSON"
+        )
+    if not isinstance(data, dict):
+        return IdentifiedPaper(
+            expected_title="", confidence=0.0, reasoning="LLM response was not a JSON object"
+        )
+
+    year_val = data.get("expected_year")
+    if isinstance(year_val, str):
+        m = re.search(r"\d{4}", year_val)
+        year_val = int(m.group(0)) if m else None
+    elif not isinstance(year_val, int):
+        year_val = None
+
+    identified = IdentifiedPaper(
+        expected_title=str(data.get("expected_title") or "").strip(),
+        expected_first_author=(data.get("expected_first_author") or None),
+        expected_year=year_val,
+        expected_venue=(data.get("expected_venue") or None),
+        arxiv_id=(data.get("arxiv_id") or None),
+        confidence=float(data.get("confidence") or 0.0),
+        reasoning=str(data.get("reasoning") or ""),
+    )
+    dbg.trace(
+        "llm.identify",
+        "result",
+        title=identified.expected_title,
+        author=identified.expected_first_author,
+        year=identified.expected_year,
+        venue=identified.expected_venue,
+        arxiv=identified.arxiv_id,
+        conf=round(identified.confidence, 2),
+    )
+    return identified
+
+
+@dataclass
 class ClaimSupport:
     """Verdict from the LLM-as-judge that decides whether a Scholar hit is the right
     paper to cite for a particular prose claim. Used by ``suggest``."""

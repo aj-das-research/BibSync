@@ -104,6 +104,7 @@ class SuggestionResult:
     cite_key: Optional[str] = None
     status: str = "pending"  # "added" | "skipped" | "no_scholar_hit" | "anchor_not_found" | "duplicate" | "error"
     note: str = ""
+    identification: Optional["llm.IdentifiedPaper"] = None
 
 
 @dataclass
@@ -131,6 +132,27 @@ def _has_existing_cite(paragraph: str) -> bool:
 
 
 
+def _queries_from_identification(ident: llm.IdentifiedPaper) -> list[str]:
+    """Build targeted Scholar queries from the LLM's paper identification.
+
+    The strongest query is the verbatim paper title (Scholar is title-search-friendly).
+    Adding the first-author surname narrows further when the title is generic.
+    arXiv id is its own deterministic hit when known.
+    """
+    out: list[str] = []
+    if not ident or not ident.expected_title:
+        return out
+    title = ident.expected_title.strip().strip('"').strip("'")
+    if not title:
+        return out
+    if ident.expected_first_author:
+        out.append(f"{title} {ident.expected_first_author}")
+    out.append(title)
+    if ident.arxiv_id:
+        out.append(f"arXiv:{ident.arxiv_id}")
+    return out
+
+
 async def _resolve_suggestion(
     suggestion: llm.CitationSuggestion,
     paragraph: str,
@@ -140,6 +162,7 @@ async def _resolve_suggestion(
     model: Optional[str],
     api_key: Optional[str],
     used_cluster_ids: Optional[set] = None,
+    document_context: str = "",
 ) -> tuple[SuggestionResult, Optional[dict]]:
     """Agentic pipeline for one suggested citation:
 
@@ -163,11 +186,32 @@ async def _resolve_suggestion(
         reason=suggestion.reason,
     )
 
-    # Build the final query list: deterministic canonical-paper queries FIRST
-    # (highest-recall for short named-system anchors), then the LLM-proposed queries.
+    # === Step 0: LLM world-knowledge paper identification ===
+    # The most reliable signal we have. For famous papers (UNI, BERT, Vaswani, etc.)
+    # the LLM just *knows* the canonical paper from training data. We use its named
+    # title + first-author as a targeted Scholar query — far more reliable than
+    # topic-guessing.
+    try:
+        identification = llm.identify_canonical_paper(
+            claim=suggestion.anchor,
+            paragraph=paragraph,
+            document_context=document_context,
+            model=model,
+            api_key=api_key,
+        )
+    except Exception as e:
+        dbg.trace("suggest.identify", "ERR", error=str(e))
+        identification = llm.IdentifiedPaper(expected_title="", confidence=0.0)
+
+    targeted_qs: list[str] = []
+    if identification.confidence >= 0.4:  # accept even moderately confident IDs
+        targeted_qs = _queries_from_identification(identification)
     canonical_qs = _canonical_paper_queries(suggestion.anchor)
-    all_queries: list[str] = list(canonical_qs)
-    for q in suggestion.queries:
+
+    # Query order: LLM-identified-title first (most precise), then deterministic
+    # canonical pattern, then LLM-proposed topical queries.
+    all_queries: list[str] = []
+    for q in targeted_qs + canonical_qs + list(suggestion.queries):
         if q and q not in all_queries:
             all_queries.append(q)
 
@@ -175,10 +219,17 @@ async def _resolve_suggestion(
         "suggest.resolve",
         "start",
         anchor=suggestion.anchor,
+        identified_title=identification.expected_title,
+        identified_author=identification.expected_first_author,
+        identified_year=identification.expected_year,
+        identified_conf=round(identification.confidence, 2),
+        targeted_queries=targeted_qs,
         canonical_queries=canonical_qs,
         llm_queries=suggestion.queries,
         para=paragraph_idx,
     )
+    # Stash identification on the result so the report can show it.
+    result.identification = identification
 
     # Pipeline shape (query-by-query early exit):
     #
@@ -377,11 +428,17 @@ async def suggest_for_file(
 
     db = bibtex.load(bib_file)
 
+    # Document context for the LLM identifier — pass the whole tex file (capped in
+    # the identifier itself) so anchors like "UNI" can be disambiguated by the
+    # surrounding paper topic.
+    document_context = text
+
     dbg.trace(
         "suggest.start",
         tex=str(tex_file),
         bib=str(bib_file),
         paragraphs=len(paragraphs),
+        doc_chars=len(document_context),
     )
 
     # Track which Scholar cluster_ids we've already cited in THIS run. If two
@@ -434,6 +491,7 @@ async def suggest_for_file(
                     sugg, paragraph, p_idx,
                     headless=headless, model=model, api_key=api_key,
                     used_cluster_ids=used_cluster_ids,
+                    document_context=document_context,
                 )
 
                 if entry is None:
