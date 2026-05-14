@@ -15,6 +15,7 @@ import urllib.parse
 from typing import Optional
 
 from .. import dbg
+from ._match import titles_match
 from .types import PaperContent
 
 CROSSREF_API = "https://api.crossref.org/works"
@@ -38,7 +39,7 @@ async def search_crossref(
 
     dbg.trace("audit.source.crossref", "query", title=title, doi=doi)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(
                 url,
                 headers={"User-Agent": "bibsync/0.1 (mailto:noreply@bibsync.dev)"},
@@ -46,7 +47,12 @@ async def search_crossref(
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
-        dbg.trace("audit.source.crossref", "request failed", error=str(e))
+        dbg.trace(
+            "audit.source.crossref",
+            "request failed",
+            error_type=type(e).__name__,
+            error=str(e) or repr(e),
+        )
         return None
 
     if doi:
@@ -98,6 +104,11 @@ async def search_crossref(
         doi=msg.get("DOI"),
         source="crossref",
     )
+    # Crossref's title-search is famously loose — it'll happily return
+    # "Spectrum-BERT" for a "BERT" query. The guard is mandatory here.
+    # If we were called by DOI, skip the guard (the lookup was already exact).
+    if not doi and not titles_match(title, result.title, source="crossref"):
+        return None
     dbg.trace(
         "audit.source.crossref",
         "hit",

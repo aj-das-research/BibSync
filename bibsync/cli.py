@@ -834,6 +834,41 @@ def audit_cmd(
             parts.append(f"[{color}]{summary[status]} {status}[/{color}]")
     console.print(f"[bold]Summary:[/bold] " + ", ".join(parts))
 
+    # ── Tier-2 degradation summary ─────────────────────────────────────────
+    # If the user asked for tier N but most cites only achieved a lower tier,
+    # surface that loudly — otherwise the user sees "verified" verdicts that
+    # were actually made on weaker evidence than they requested.
+    if tier >= 1 and report.checks:
+        auditable = [c for c in report.checks if c.status != "missing_in_bib"]
+        if auditable:
+            degraded = [c for c in auditable if c.evidence_tier < tier]
+            if degraded and len(degraded) / len(auditable) >= 0.25:
+                reason_counts: dict[str, int] = {}
+                for c in degraded:
+                    reason_counts[c.degraded_reason or "unknown"] = (
+                        reason_counts.get(c.degraded_reason or "unknown", 0) + 1
+                    )
+                _REASON_HUMAN = {
+                    "source_not_found": "no source (arXiv/SS/Crossref all missed or rate-limited)",
+                    "no_open_access_pdf": "paper found but no open-access PDF",
+                    "pdf_download_or_extract_failed": "PDF download/extract failed",
+                    "embedding_failed": "embeddings unavailable (install fastembed or use --embedding-backend api)",
+                    "unknown": "unknown reason — re-run with --debug to see traces",
+                }
+                lines = [
+                    f"[bold yellow]⚠  Tier-{tier} requested, but {len(degraded)}/{len(auditable)} citation(s) "
+                    f"verified on weaker evidence.[/bold yellow]"
+                ]
+                for reason, n in sorted(reason_counts.items(), key=lambda kv: -kv[1]):
+                    lines.append(f"   • [yellow]{n}[/yellow] × {_REASON_HUMAN.get(reason, reason)}")
+                lines.append(
+                    "[dim]Verdicts marked `verified` on degraded evidence may be "
+                    "false-positives. Re-run with --debug to see why.[/dim]"
+                )
+                console.print()
+                for ln in lines:
+                    console.print(ln)
+
     fixed_count = sum(1 for c in report.checks if c.fixed)
     if fixed_count:
         console.print(

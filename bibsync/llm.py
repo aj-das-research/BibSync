@@ -1013,6 +1013,47 @@ Return a single JSON object:
 """
 
 
+_AUDIT_TIER0_SUFFIX = """\
+
+═════════════════════════════════════════════════════════════════════
+EVIDENCE: paper METADATA ONLY (title + authors + year + venue)
+═════════════════════════════════════════════════════════════════════
+You have NO abstract and NO full-text excerpts. You see only the cited paper's
+bibliographic metadata plus your own training-data knowledge.
+
+Hard rules for metadata-only verdicts:
+
+  • TOPIC-LEVEL claims (e.g. "the Transformer architecture introduced
+    self-attention", "BERT pretrains bidirectional transformers") — if the
+    paper title clearly names the topic/method, supports=true is appropriate.
+
+  • QUANTITATIVE claims (a specific number, percentage, benchmark name, dataset
+    name, parameter count, accuracy, F1, etc.) — DO NOT high-confidence verify
+    on metadata alone. The title doesn't carry quantitative content. Even if
+    the paper plausibly contains the number, you have no way to know from
+    metadata. Return supports=false with MEDIUM confidence (~0.5–0.65) and say
+    "metadata insufficient for quantitative claim" in reasoning. The caller
+    treats medium-conf supports=false as `unverifiable`, not as
+    `hallucinated`, so this won't delete the citation — it only refuses to
+    rubber-stamp it.
+
+  • NAMED-BENCHMARK claims ("X achieves Y on Z benchmark") — same rule. The
+    title rarely names every benchmark a paper reports. Refuse to verify with
+    high confidence.
+
+  • OBVIOUS TOPIC MISMATCH (a CV paper for an NLP claim) — supports=false high
+    confidence is still appropriate even with metadata only.
+
+Examples:
+  claim: "GPT-3 achieves 86.5% on MedQA"  →  cited: "Language Models are
+  Few-Shot Learners" (Brown 2020). Topic plausible, BUT the claim is
+  quantitative + named-benchmark. From metadata alone you cannot confirm the
+  paper actually reports 86.5% on MedQA. Verdict: supports=false, conf~0.55,
+  reasoning="quantitative MedQA accuracy claim cannot be verified from
+  metadata alone; needs abstract or full-text".
+"""
+
+
 _AUDIT_TIER1_SUFFIX = """\
 
 ═════════════════════════════════════════════════════════════════════
@@ -1043,21 +1084,47 @@ You receive both the paper's abstract AND several excerpts retrieved by semantic
 search against the prose claim. The excerpts are direct evidence; the abstract
 is for context.
 
-When evaluating:
-  • If a retrieved chunk directly supports the claim (e.g. mentions the same
-    method, dataset, finding, or number) → supports=true with high confidence.
-  • If the chunks discuss the topic but don't mention the specific point in the
-    claim → supports=false with medium confidence ("unsupported by the
-    retrieved evidence").
-  • If retrieved chunks directly CONTRADICT the claim (e.g. paper reports a
-    different number than the claim states) → supports=false with high
-    confidence ("misattribution").
-  • If chunks are off-topic from the claim → fall back to abstract-level
-    evaluation.
+═════════════════════════════════════════════════════════════════════
+HARD RULES — verbatim grounding (READ CAREFULLY)
+═════════════════════════════════════════════════════════════════════
 
-In your reasoning, quote the most relevant retrieved chunk by its page
-reference (e.g. "p.3 says ..."). Be specific. The user is grading the
-verdict against the actual paper.
+For QUANTITATIVE claims (a specific number, percentage, accuracy, parameter
+count) OR NAMED-ENTITY claims (a named benchmark like MedQA / ImageNet / GLUE,
+a named dataset, a named method): you MUST find a verbatim phrase in one of the
+retrieved chunks that contains the SPECIFIC number / benchmark / entity from
+the claim before returning supports=true.
+
+  • If the claim says "GPT-3 achieves 86.5% on MedQA": you must quote a chunk
+    containing both "MedQA" AND a number ≈ 86.5 (or close enough). It is NOT
+    enough that the chunks mention "various benchmarks" or "question
+    answering". Generic-topic alignment does NOT verify a specific number or
+    named benchmark.
+
+  • If the claim says "BERT-base has 110M parameters": you must quote a chunk
+    containing "110M" (or "110 million", or "BERT-base ... parameters" with a
+    matching number).
+
+  • If you CANNOT find a verbatim quote with the specific entity/number,
+    return supports=false with medium confidence (≤0.7) and put the missing
+    entity/number in your reasoning: e.g. "no chunk mentions MedQA or 86.5%
+    — likely misattribution".
+
+For TOPIC-LEVEL claims (no specific number, no specific named benchmark) —
+e.g. "introduced multi-head self-attention", "established pretraining-then-
+finetuning paradigm" — a chunk that discusses the same general method or
+contribution is sufficient. Quote it anyway.
+
+In your reasoning field:
+  • If supports=true: quote the chunk by page reference, e.g.
+    "p.7 says 'BERT_BASE: L=12, H=768, A=12, Total Parameters=110M'".
+  • If supports=false on a quantitative/named-entity claim: explicitly state
+    what's MISSING from the chunks, e.g. "no chunk contains 'MedQA' or any
+    number near 86.5%".
+
+DO NOT paraphrase generously. DO NOT infer that because the paper "evaluates
+many benchmarks" it must therefore evaluate the specific benchmark in the
+claim. The retrieved chunks are the only evidence — if a number or named
+entity isn't in them, you cannot verify it.
 """
 
 
@@ -1104,7 +1171,9 @@ def audit_citation(
 
     tier = 2 if retrieved_chunks else (1 if abstract else 0)
     system = _AUDIT_CITATION_SYSTEM
-    if tier == 1:
+    if tier == 0:
+        system = _AUDIT_CITATION_SYSTEM + _AUDIT_TIER0_SUFFIX
+    elif tier == 1:
         system = _AUDIT_CITATION_SYSTEM + _AUDIT_TIER1_SUFFIX
     elif tier == 2:
         system = _AUDIT_CITATION_SYSTEM + _AUDIT_TIER1_SUFFIX + _AUDIT_TIER2_SUFFIX

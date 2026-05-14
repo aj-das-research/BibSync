@@ -65,6 +65,14 @@ class CitationCheck:
     evidence_tier: int = 0  # 0 = metadata only, 1 = abstract used, 2 = chunks used
     paper_content: Optional["PaperContent"] = None  # what audit_sources returned
     n_chunks: int = 0  # how many retrieved chunks were sent to the LLM (tier 2)
+    # If the user requested a higher tier but we couldn't deliver it, record WHY
+    # so the end-of-run summary can surface a loud diagnostic. One of:
+    #   "" (no degradation)
+    #   "source_not_found"   — arXiv/SS/Crossref all missed
+    #   "no_open_access_pdf" — paper found but no pdf_url (Tier 2 only)
+    #   "pdf_download_failed", "pdf_extract_failed"
+    #   "embedding_failed"   — fastembed not installed AND API embeddings unusable
+    degraded_reason: str = ""
 
 
 @dataclass
@@ -197,6 +205,30 @@ def _gather_citations(project_root: Path) -> tuple[list[CitationCheck], int]:
                     )
                 )
     return checks, len(tex_files)
+
+
+# Heuristic: does this claim contain quantitative / named-benchmark content
+# that metadata alone (Tier 0) cannot reasonably verify? Used as a safety net
+# to downgrade Tier-0 high-confidence "supports=true" verdicts to
+# "unverifiable" — preventing the LLM from rubber-stamping fabricated numbers
+# on the basis of a topic-ish title.
+_QUANTITATIVE_CLAIM_RE = re.compile(
+    r"""
+    \b\d+\s*%                          # "86.5%"
+    | \b\d[\d,.]*\s*(?:M|B|K)?\s*(?:parameters|params|layers|epochs|steps)\b
+    | \b(?:F1|BLEU|ROUGE|MMLU|MedQA|HumanEval|GLUE|SuperGLUE|ImageNet|
+          LibriSpeech|SQuAD|WMT|COCO|CIFAR|MNIST)\b   # named benchmarks
+    | \bstate[- ]of[- ]the[- ]art\b
+    | \b\d+\s*(?:billion|million|trillion)\s+parameters?\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _is_quantitative_claim(claim: str) -> bool:
+    """True if the claim contains a specific number, benchmark name, or other
+    quantitative content that metadata alone cannot verify."""
+    return bool(_QUANTITATIVE_CLAIM_RE.search(claim or ""))
 
 
 # --- main pipeline ---------------------------------------------------------
@@ -388,38 +420,56 @@ async def audit_project(
 
         # Step 3 — Tier 2: PDF → chunks → retrieve top-K relevant chunks for THIS claim.
         retrieved_chunk_texts: Optional[list[str]] = None
-        if tier >= 2 and content and content.pdf_url and pdf_cache and embed_store:
-            from .audit_sources.pdf import get_paper_text
-            from .audit_rag import chunk_text
-
-            paper_key = content.stable_key()
-            if check.cite_key in paper_chunks_by_key:
-                chunks = paper_chunks_by_key[check.cite_key]
+        tier2_failure_reason = ""
+        if tier >= 2 and pdf_cache and embed_store:
+            if not content:
+                tier2_failure_reason = "source_not_found"
+            elif not content.pdf_url:
+                tier2_failure_reason = "no_open_access_pdf"
             else:
-                text = await get_paper_text(paper_key, content.pdf_url, pdf_cache)
-                chunks = chunk_text(text, paper_key) if text else []
-                paper_chunks_by_key[check.cite_key] = chunks
+                from .audit_sources.pdf import get_paper_text
+                from .audit_rag import chunk_text
 
-            if chunks:
-                top = await embed_store.retrieve(
-                    query=check.claim_text,
-                    paper_key=paper_key,
-                    chunks=chunks,
-                    top_k=rag_top_k,
-                )
-                retrieved_chunk_texts = [
-                    f"[p.{c.page or '?'}] {c.text}" for c, _score in top
-                ]
-                check.n_chunks = len(retrieved_chunk_texts)
+                paper_key = content.stable_key()
+                if check.cite_key in paper_chunks_by_key:
+                    chunks = paper_chunks_by_key[check.cite_key]
+                else:
+                    text = await get_paper_text(paper_key, content.pdf_url, pdf_cache)
+                    chunks = chunk_text(text, paper_key) if text else []
+                    paper_chunks_by_key[check.cite_key] = chunks
 
-        # Record what tier we actually achieved for this check (may be lower than
-        # the requested ``tier`` if the paper wasn't on arXiv/SS/Crossref).
+                if not chunks:
+                    tier2_failure_reason = "pdf_download_or_extract_failed"
+                else:
+                    top = await embed_store.retrieve(
+                        query=check.claim_text,
+                        paper_key=paper_key,
+                        chunks=chunks,
+                        top_k=rag_top_k,
+                    )
+                    if not top:
+                        tier2_failure_reason = "embedding_failed"
+                    else:
+                        retrieved_chunk_texts = [
+                            f"[p.{c.page or '?'}] {c.text}" for c, _score in top
+                        ]
+                        check.n_chunks = len(retrieved_chunk_texts)
+
+        # Record what tier we actually achieved (may be lower than the requested
+        # ``tier`` if the paper wasn't on arXiv/SS/Crossref or had no PDF).
         if retrieved_chunk_texts:
             check.evidence_tier = 2
         elif abstract:
             check.evidence_tier = 1
         else:
             check.evidence_tier = 0
+
+        # Record WHY we degraded so the end-of-run summary can surface it.
+        if tier >= 1 and check.evidence_tier < 1 and not content:
+            check.degraded_reason = "source_not_found"
+        if tier >= 2 and check.evidence_tier < 2 and tier2_failure_reason:
+            # Only overwrite if Tier 2 actually had a reason — keep tier-1 reason otherwise.
+            check.degraded_reason = tier2_failure_reason
 
         # Step 4 — LLM audit (verdict cached by (cite_key, claim) pair).
         cache_key = (check.cite_key, check.claim_text)
@@ -447,7 +497,31 @@ async def audit_project(
 
         check.confidence = verdict.confidence
         check.reasoning = verdict.reasoning
-        if verdict.supports:
+
+        # SAFETY NET — if we only had metadata (Tier 0) and the claim contains
+        # quantitative / named-benchmark content, refuse to high-confidence
+        # verify on title-alone. This catches the case where the LLM ignores
+        # the Tier-0 prompt rule and still returns supports=true on a number-
+        # bearing claim. We don't FLIP to "hallucinated" — that would risk
+        # auto-deleting good citations — we route to "unverifiable" so the
+        # user sees the gap and can re-run at higher tier.
+        if (
+            check.evidence_tier == 0
+            and verdict.supports
+            and _is_quantitative_claim(check.claim_text)
+        ):
+            check.status = "unverifiable"
+            check.reasoning = (
+                "metadata-only evidence cannot verify a quantitative / "
+                "named-benchmark claim; re-run with --tier 1 or --tier 2"
+            )
+            dbg.trace(
+                "audit.safety",
+                "downgraded Tier-0 supports=true on quantitative claim",
+                key=check.cite_key,
+                claim=check.claim_text[:80],
+            )
+        elif verdict.supports:
             check.status = "verified"
         elif verdict.confidence >= confidence_floor:
             check.status = "hallucinated"

@@ -12,6 +12,7 @@ import urllib.parse
 from typing import Optional
 
 from .. import dbg
+from ._match import titles_match
 from .types import PaperContent
 
 SS_API = "https://api.semanticscholar.org/graph/v1/paper/search"
@@ -39,7 +40,7 @@ async def search_semantic_scholar(
 
     dbg.trace("audit.source.ss", "query", title=title, has_api_key=bool(api_key))
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
             if resp.status_code == 429:
                 dbg.trace("audit.source.ss", "rate limited")
@@ -47,7 +48,12 @@ async def search_semantic_scholar(
             resp.raise_for_status()
             data = resp.json()
     except Exception as e:
-        dbg.trace("audit.source.ss", "request failed", error=str(e))
+        dbg.trace(
+            "audit.source.ss",
+            "request failed",
+            error_type=type(e).__name__,
+            error=str(e) or repr(e),
+        )
         return None
 
     items = data.get("data") or []
@@ -71,6 +77,8 @@ async def search_semantic_scholar(
         pdf_url=oapdf.get("url"),
         source="semantic_scholar",
     )
+    if not titles_match(title, result.title, source="semantic_scholar"):
+        return None
     dbg.trace(
         "audit.source.ss",
         "hit",

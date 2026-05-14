@@ -9,9 +9,13 @@ import urllib.parse
 from typing import Optional
 
 from .. import dbg
+from ._match import titles_match
 from .types import PaperContent
 
-ARXIV_API = "http://export.arxiv.org/api/query"
+# arXiv issues a 301 from http→https and httpx.AsyncClient does NOT follow
+# redirects by default (unlike requests). Use https directly and pass
+# follow_redirects=True as belt-and-suspenders against future redirect changes.
+ARXIV_API = "https://export.arxiv.org/api/query"
 
 
 async def search_arxiv(
@@ -36,19 +40,30 @@ async def search_arxiv(
 
     dbg.trace("audit.source.arxiv", "query", title=title, author=first_author)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(url, headers={"User-Agent": "bibsync/0.1"})
             resp.raise_for_status()
             xml = resp.text
     except Exception as e:
-        dbg.trace("audit.source.arxiv", "request failed", error=str(e))
+        # Some httpx errors (e.g. ReadTimeout) have empty str(e) but informative
+        # repr(e); use the latter so the trace is actually debuggable.
+        dbg.trace(
+            "audit.source.arxiv",
+            "request failed",
+            error_type=type(e).__name__,
+            error=str(e) or repr(e),
+        )
         return None
 
     result = _parse_arxiv_atom(xml)
-    if result:
-        dbg.trace("audit.source.arxiv", "hit", title=result.title, arxiv_id=result.arxiv_id)
-    else:
+    if not result:
         dbg.trace("audit.source.arxiv", "miss")
+        return None
+    if not titles_match(title, result.title, source="arxiv"):
+        # arXiv accepted the request but returned a different paper. Reject so
+        # the orchestrator falls through to the next source.
+        return None
+    dbg.trace("audit.source.arxiv", "hit", title=result.title, arxiv_id=result.arxiv_id)
     return result
 
 
