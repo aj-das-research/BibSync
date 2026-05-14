@@ -626,6 +626,14 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
     "(keeps the rest of the \\cite{...} list intact when only some keys are bad).",
 )
 @click.option(
+    "--per-dir-bib",
+    is_flag=True,
+    default=False,
+    help="For multi-subproject trees: for each .tex file, audit against the NEAREST "
+    ".bib in its directory chain rather than the single --bib file. Use when the "
+    "project has multiple subdirectories each with their own bibliography.",
+)
+@click.option(
     "--confidence-floor",
     type=float,
     default=0.7,
@@ -651,6 +659,7 @@ def audit_cmd(
     cache_dir: Optional[Path],
     no_cache: bool,
     do_fix: bool,
+    per_dir_bib: bool,
     confidence_floor: float,
     delay: float,
 ) -> None:
@@ -702,11 +711,58 @@ def audit_cmd(
         no_cache=no_cache,
         rag_top_k=rag_top_k,
         embedding_model=embedding_model,
+        per_dir_bib=per_dir_bib,
     )
 
     if not report.checks:
         console.print(f"[dim]No \\cite{{}} calls found in {project_root}.[/dim]")
         return
+
+    # Pre-emptive UX guard: if a large fraction of cites come back missing_in_bib,
+    # this is almost always a setup error (wrong --bib, or auditing a multi-subproject
+    # tree without --per-dir-bib). Surface it loudly BEFORE the giant table.
+    summary_check = report.summary()
+    n_total = len(report.checks)
+    n_missing = summary_check.get("missing_in_bib", 0)
+    if n_total >= 3 and n_missing / n_total >= 0.5:
+        bib_files_in_tree = []
+        try:
+            bib_files_in_tree = sorted(
+                p
+                for p in project_root.rglob("*.bib")
+                if not any(part in {".git", ".venv", "node_modules"} for part in p.parts)
+            )
+        except OSError:
+            pass
+        console.print()
+        console.print(
+            "[bold red]⚠  Most citations came back as `missing_in_bib`.[/bold red] "
+            f"({n_missing}/{n_total})"
+        )
+        console.print(
+            "    This usually means the [bold]--bib[/bold] you passed doesn't contain the keys "
+            "the .tex files reference."
+        )
+        if len(bib_files_in_tree) > 1 and not per_dir_bib:
+            console.print(
+                f"    Your project tree has [bold]{len(bib_files_in_tree)} .bib files[/bold] — "
+                f"audit only used [bold]{bib_path}[/bold]."
+            )
+            console.print("    [green]Fix:[/green] re-run with [bold]--per-dir-bib[/bold] "
+                          "to audit each .tex against its nearest .bib:")
+            console.print(
+                f"      [dim]bibsync audit {project_root} --per-dir-bib --tier {tier}"
+                + (" --fix" if do_fix else "") + "[/dim]"
+            )
+            console.print("    …or scope the audit to a single subproject:")
+            sample = bib_files_in_tree[0]
+            console.print(
+                f"      [dim]bibsync audit {sample.parent} --bib {sample} --tier {tier}[/dim]"
+            )
+        else:
+            console.print("    [green]Check:[/green] does this --bib actually correspond to the "
+                          "scanned .tex files?")
+        console.print()
 
     t = Table(
         title=f"Citation audit — {project_root}  (bib: {bib_path.name})",

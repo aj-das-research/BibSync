@@ -70,9 +70,11 @@ class CitationCheck:
 @dataclass
 class AuditReport:
     project_root: Path
-    bib_file: Path
+    bib_file: Path  # the primary .bib (or the literal --bib arg when --per-dir-bib is on)
     tex_files_scanned: int = 0
     checks: list[CitationCheck] = field(default_factory=list)
+    # Per-tex bib resolution (only set when per_dir_bib was True):
+    bib_files_used: dict[Path, Path] = field(default_factory=dict)
 
     def summary(self) -> dict[str, int]:
         out: dict[str, int] = {}
@@ -127,6 +129,29 @@ def _entry_to_audit_inputs(entry: dict) -> tuple[str, str, Optional[int], str]:
     )
     venue = re.sub(r"[{}]", "", venue).strip()
     return title, authors, year, venue
+
+
+def _nearest_bib(tex_file: Path, project_root: Path) -> Optional[Path]:
+    """Walk up from ``tex_file``'s directory looking for the closest ``.bib`` file,
+    stopping at ``project_root``. Returns ``None`` if no ``.bib`` is found in the
+    chain. Used by ``--per-dir-bib`` so a project tree with multiple subprojects
+    (each with their own bibliography) audits correctly against each subproject's
+    own .bib.
+    """
+    tex_dir = tex_file.parent.resolve()
+    root = project_root.resolve()
+    current = tex_dir
+    while True:
+        bib_candidates = sorted(current.glob("*.bib"))
+        if bib_candidates:
+            # Prefer "references.bib" if it exists, else first alphabetically.
+            for c in bib_candidates:
+                if c.name == "references.bib":
+                    return c
+            return bib_candidates[0]
+        if current == root or current.parent == current:
+            return None
+        current = current.parent
 
 
 def _gather_citations(project_root: Path) -> tuple[list[CitationCheck], int]:
@@ -192,6 +217,7 @@ async def audit_project(
     rag_top_k: int = 5,
     embedding_model: str = "text-embedding-3-small",
     ss_api_key: Optional[str] = None,
+    per_dir_bib: bool = False,
 ) -> AuditReport:
     """Audit every ``\\cite{}`` in ``project_root`` against the ``bib_file``.
 
@@ -223,17 +249,52 @@ async def audit_project(
     )
 
     report = AuditReport(project_root=project_root, bib_file=bib_file)
-    db = bibtex.load(bib_file)
-    bib_by_key = {e.get("ID"): e for e in db.entries}
 
     checks, tex_count = _gather_citations(project_root)
     report.tex_files_scanned = tex_count
     report.checks = checks
 
+    # Build a per-cite-check lookup dict: each check resolves against EITHER the
+    # global ``bib_file`` (default) or the nearest .bib in its .tex's directory
+    # chain (when per_dir_bib=True). We pre-load every .bib we'll need so we
+    # don't re-parse the same file for every cite that uses it.
+    bib_dbs: dict[Path, dict] = {}
+
+    def _load_bib(path: Path) -> dict:
+        path = path.resolve()
+        if path not in bib_dbs:
+            try:
+                db = bibtex.load(path)
+                bib_dbs[path] = {e.get("ID"): e for e in db.entries}
+            except Exception as e:
+                dbg.trace("audit.bib", "load failed", path=str(path), error=str(e))
+                bib_dbs[path] = {}
+        return bib_dbs[path]
+
+    # Tex-to-bib mapping
+    tex_to_bib: dict[Path, Path] = {}
+    if per_dir_bib:
+        for check in checks:
+            tex = check.file.resolve()
+            if tex in tex_to_bib:
+                continue
+            nearest = _nearest_bib(tex, project_root)
+            tex_to_bib[tex] = nearest if nearest else bib_file
+        report.bib_files_used = tex_to_bib
+        dbg.trace(
+            "audit.per_dir_bib",
+            "resolved",
+            mappings={str(k): str(v) for k, v in tex_to_bib.items()},
+        )
+    # Default load of the explicit --bib if not per_dir_bib (or as a fallback).
+    if not per_dir_bib:
+        _load_bib(bib_file)
+
     dbg.trace(
         "audit.scan",
         f"{len(checks)} citation occurrences across {tex_count} .tex files",
         unique_keys=len({c.cite_key for c in checks}),
+        per_dir_bib=per_dir_bib,
     )
 
     # Cache directories (used for Tier 1+ paper content, Tier 2 PDFs/embeddings).
@@ -265,13 +326,27 @@ async def audit_project(
     paced_keys: set[str] = set()
 
     for check in checks:
-        # Step 1 — bib lookup.
+        # Step 1 — bib lookup. Resolve which .bib applies to this check.
+        if per_dir_bib:
+            this_bib = tex_to_bib.get(check.file.resolve(), bib_file)
+        else:
+            this_bib = bib_file
+        bib_by_key = _load_bib(this_bib)
         entry = bib_by_key.get(check.cite_key)
         if entry is None:
             check.status = "missing_in_bib"
             check.confidence = 1.0
-            check.reasoning = "no entry with this key in the .bib"
-            dbg.trace("audit.check", "missing_in_bib", key=check.cite_key)
+            check.reasoning = (
+                f"no entry with this key in {this_bib.name}"
+                if per_dir_bib
+                else "no entry with this key in the .bib"
+            )
+            dbg.trace(
+                "audit.check",
+                "missing_in_bib",
+                key=check.cite_key,
+                bib=str(this_bib),
+            )
             continue
         check.bib_entry = entry
 
