@@ -532,6 +532,17 @@ async def suggest_for_file(
                     r.note = f"already in .bib as {stored['ID']}"
                     dbg.trace("suggest.commit", "duplicate", existing_key=stored["ID"])
 
+                # Persist the .bib BEFORE touching the .tex. This guarantees that
+                # if anything later (Ctrl+C, exception, anchor-not-found) interrupts
+                # us, we never leave the .tex with a \cite{} pointing to a missing
+                # .bib entry. bibtex.dump is atomic (write-tempfile-then-rename).
+                if was_added:
+                    bibtex.dump(db, bib_file)
+                    dbg.trace(
+                        "suggest.commit", "bib persisted",
+                        cite_key=r.cite_key, path=str(bib_file),
+                    )
+
                 # Insert \cite{} into the .tex at the LLM-provided anchor.
                 inserted = tex_rewrite.insert_cite_after_anchor(
                     tex_file, r.anchor, r.cite_key
@@ -555,10 +566,11 @@ async def suggest_for_file(
 
                 await asyncio.sleep(delay_seconds)
 
-    # Single .bib write at the end.
+    # Final defensive dump in case any duplicate-only paths skipped the per-step
+    # write above. Idempotent: same content, no harm.
     if any(r.status in ("added", "duplicate") for r in report.results):
         bibtex.dump(db, bib_file)
-        dbg.trace("suggest.done", "bib written", path=str(bib_file))
+        dbg.trace("suggest.done", "bib finalised", path=str(bib_file))
 
     return report
 
