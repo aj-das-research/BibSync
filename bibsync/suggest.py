@@ -137,8 +137,29 @@ def _has_existing_cite(paragraph: str) -> bool:
     return bool(_CITE_PRESENCE_RE.search(paragraph))
 
 
+# LaTeX line comment: % to end-of-line, but \% is an escaped percent.
+# Same regex as audit._COMMENT_RE; intentionally duplicated to avoid a
+# cross-module dependency for this single token-level operation.
+_TEX_COMMENT_RE = re.compile(r"(?<!\\)%[^\n]*")
+
+
+def _strip_tex_comments(text: str) -> str:
+    """Remove LaTeX % line comments and collapse whitespace.
+
+    Used to clean a paragraph before extracting the prose sentence that
+    contains an anchor. Comments are author-side notes (often containing
+    anchor phrases verbatim — e.g. ``% should cite Vaswani for self-attention``)
+    that would mislead a naive ``paragraph.find(anchor)`` into pivoting on a
+    comment occurrence instead of the real prose. Unlike ``audit._strip_comments``
+    we DON'T preserve offsets — the suggest pipeline operates on extracted
+    strings, not on file-level character positions.
+    """
+    stripped = _TEX_COMMENT_RE.sub("", text)
+    return re.sub(r"\s+", " ", stripped).strip()
+
+
 def _claim_sentence_around_anchor(paragraph: str, anchor: str) -> str:
-    """Return the sentence in ``paragraph`` that contains ``anchor``.
+    """Return the prose sentence in ``paragraph`` that contains ``anchor``.
 
     This is the prose claim Filter D should ground against — NOT the anchor
     itself. Passing just the anchor (often a 1-2 word phrase like 'GPT-3') to
@@ -147,29 +168,34 @@ def _claim_sentence_around_anchor(paragraph: str, anchor: str) -> str:
     misattribution we want to catch lives in the full sentence (e.g.
     "GPT-3 achieves 86.5% on MedQA" → the GPT-3 paper does NOT support that).
 
-    Mirrors ``audit._extract_claim``'s sentence-boundary logic, but uses the
-    anchor's position in the paragraph as the pivot. Falls back to the whole
-    paragraph if the anchor isn't found (e.g. case-folded or stripped).
+    LaTeX comments are stripped FIRST. Without that, ``paragraph.find(anchor)``
+    would pivot on the first comment-line mention of the anchor (e.g. an
+    author note like ``% should cite Brown 2020 for GPT-3 claim``) and extract
+    a "sentence" from inside the comments — which is what bit us in the
+    suggest_verify_demo fixture.
+
+    Mirrors ``audit._extract_claim``'s sentence-boundary logic but pivots on
+    the anchor's position. Falls back to the whole (comment-stripped)
+    paragraph if the anchor isn't found.
     """
-    if not anchor:
-        return paragraph.strip()
-    idx = paragraph.find(anchor)
+    prose = _strip_tex_comments(paragraph)
+    if not anchor or not prose:
+        return prose
+    idx = prose.find(anchor)
     if idx < 0:
-        # Try a case-insensitive search before giving up — anchors sometimes
-        # come back lower-cased from the LLM.
-        lower = paragraph.lower()
-        idx = lower.find(anchor.lower())
+        # Case-insensitive fallback — anchors sometimes come back lower-cased.
+        idx = prose.lower().find(anchor.lower())
         if idx < 0:
-            return paragraph.strip()
-    # Walk back to start of previous sentence (or paragraph start).
+            return prose
+    # Walk back to start of previous sentence (or prose start).
     start = 0
-    for m in re.finditer(r"(?:[.!?]\s+)|(?:\n\s*\n)", paragraph[:idx]):
+    for m in re.finditer(r"(?:[.!?]\s+)|(?:\n\s*\n)", prose[:idx]):
         start = m.end()
     # Walk forward to next sentence end.
-    after = paragraph[idx:]
+    after = prose[idx:]
     end_m = re.search(r"[.!?](?:\s|\n|$)", after)
     end = idx + (end_m.end() if end_m else len(after))
-    return paragraph[start:end].strip()
+    return prose[start:end].strip()
 
 
 
@@ -483,6 +509,13 @@ async def _resolve_suggestion(
     # specific claim" — a much more actionable user signal than "no canonical
     # match found at all".
     grounding_blocked: bool = False
+    # The Filter D rejection reason and the candidate that triggered it.
+    # We track these separately from ``last_reason`` because the loop may
+    # continue evaluating more candidates AFTER a Filter D rejection — each
+    # subsequent Filter C rejection overwrites ``last_reason``, which would
+    # otherwise hide the much-more-informative Filter D reason in the report.
+    grounded_rejection_reason: str = ""
+    grounded_rejection_candidate: Optional[PaperHit] = None
     last_reason = ""
     last_confidence = 0.0
     used = used_cluster_ids if used_cluster_ids is not None else set()
@@ -609,6 +642,16 @@ async def _resolve_suggestion(
                     f"{grounding.reason}"
                 )
                 last_confidence = grounding.confidence
+                # PRESERVE the Filter D rejection reason separately. Subsequent
+                # Filter C rejections will overwrite ``last_reason`` (since they
+                # share that channel), but the Filter D reason is the one the
+                # user actually needs to see — it explains WHY the canonical
+                # paper failed to support the claim. We keep only the FIRST
+                # Filter D rejection (typically the highest-cited / most-canonical
+                # candidate, which gives the most authoritative rejection signal).
+                if not grounded_rejection_reason:
+                    grounded_rejection_reason = last_reason
+                    grounded_rejection_candidate = candidate
                 dbg.trace(
                     "suggest.ground",
                     f"rejected (after q{q_idx + 1}, cand{cand_i + 1})",
@@ -668,17 +711,31 @@ async def _resolve_suggestion(
             # the user likely needs to fix their CLAIM, not search for a different
             # paper.
             result.status = "no_grounded_match"
-            result.note = (
+            # Prefer the *first* Filter D rejection reason (which we preserved
+            # separately). Subsequent Filter C rejections clobbered last_reason
+            # with generic "rule W: different topic" messages which hide the
+            # high-value Filter D signal.
+            informative_reason = grounded_rejection_reason or last_reason
+            note_parts = [
                 f"canonical paper found, but grounding (Tier-1/2) rejected — "
-                f"{last_reason}"
-            )
+                f"{informative_reason}"
+            ]
+            if grounded_rejection_candidate is not None:
+                note_parts.append(
+                    f"[rejected candidate: {grounded_rejection_candidate.title}]"
+                )
+            result.note = " ".join(note_parts)
+            # Surface the rejected canonical candidate so the report shows
+            # WHICH paper was found-but-failed-to-ground.
+            if grounded_rejection_candidate is not None:
+                result.scholar_hit = grounded_rejection_candidate
         else:
             result.status = "no_supporting_match"
             result.note = (
                 f"LLM rejected all {min(len(sorted_pool), MAX_CANDIDATES_PER_CLAIM)} "
                 f"top candidate(s) — last reason: {last_reason}"
             )
-        if sorted_pool:
+        if result.scholar_hit is None and sorted_pool:
             result.scholar_hit = sorted_pool[0]
         return result, None
 
