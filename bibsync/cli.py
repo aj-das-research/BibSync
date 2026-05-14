@@ -256,21 +256,30 @@ def suggest_cmd(
         sys.exit(2)
     console.print(f"[dim]Using {llm_cfg.provider} ({llm_cfg.model})[/dim]")
 
-    # Closure counter so the user can see "this is suggestion #N" — much less
-    # disorienting than seeing the same Paragraph 1 header for every Med-PaLM-ish
-    # anchor in a row.
+    # Closure state:
+    #   suggestion_n           — running counter shown in the prompt header
+    #   auto_accept_remaining  — once flipped True (via "a" choice), every subsequent
+    #                            suggestion is auto-approved without prompting.
     suggestion_n = [0]
+    auto_accept_remaining = [False]
 
     def approve(result, entry: dict) -> bool:
         suggestion_n[0] += 1
         scholar_hit = result.scholar_hit
+        if auto_accept_remaining[0]:
+            # Already in "yes to all remaining" mode — print a one-line confirmation
+            # so the trace is still readable, then auto-accept.
+            console.print(
+                f"[dim]Suggestion #{suggestion_n[0]} · auto-accept · "
+                f"{result.anchor!r} → \\cite{{{result.cite_key}}}[/dim]"
+            )
+            return True
+
         console.print()
         console.print(
             f"[bold]Suggestion #{suggestion_n[0]} · Paragraph {result.paragraph_index}[/bold]"
         )
         console.print(f"  [cyan]Anchor:[/cyan] {result.anchor!r}")
-        # Show the LLM's identification (world-knowledge guess at the canonical paper)
-        # so the user can compare it against Scholar's actual hit.
         ident = getattr(result, "identification", None)
         if ident and ident.expected_title:
             year_str = str(ident.expected_year) if ident.expected_year else "?"
@@ -285,10 +294,18 @@ def suggest_cmd(
             console.print(f"  [green]Scholar match:[/green] {scholar_hit.short()}")
         console.print(f"  [yellow]Will insert:[/yellow] \\cite{{{result.cite_key}}}")
         choice = Prompt.ask(
-            "  Accept? [y/n/q to quit]", choices=["y", "n", "q"], default="y"
+            "  Accept? [y]es / [n]o / [a]ccept all remaining / [q]uit",
+            choices=["y", "n", "a", "q"],
+            default="y",
         )
         if choice == "q":
             raise click.Abort()
+        if choice == "a":
+            auto_accept_remaining[0] = True
+            console.print(
+                "[dim](auto-accepting all subsequent suggestions for this run)[/dim]"
+            )
+            return True
         return choice == "y"
 
     report = suggest_mod.suggest_for_file_sync(
