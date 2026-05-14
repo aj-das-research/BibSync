@@ -20,8 +20,15 @@ Two embedding backends, resolved local-first:
      Requires ``pip install -e ".[audit-rag]"`` (which includes fastembed).
 
   2. API — via the OpenAI-compatible ``embeddings`` endpoint. Used when
-     fastembed isn't installed AND the configured LLM provider exposes an
-     embeddings route (OpenAI native; OpenRouter for some models).
+     fastembed isn't installed, or when the user explicitly passes
+     ``--embedding-backend api``. Default model is provider-aware:
+
+       - OpenRouter (``sk-or-...`` keys) → ``baai/bge-m3``
+         (open-source BGE, 8K ctx, ~$0.01 / 1M tokens, routable via
+         OpenRouter's ``/v1/embeddings`` endpoint).
+       - OpenAI native (``sk-...`` keys) → ``text-embedding-3-small``.
+
+     Override either with ``--embedding-model <id>``.
 
 Cache invalidates automatically on model change because the effective
 model name is stored alongside the vectors. Cosine similarity in pure
@@ -112,7 +119,26 @@ def _cosine(a: list[float], b: list[float]) -> float:
 # Default models per backend. Both produce dense embeddings; cache is keyed by
 # the actual model name, so switching backends invalidates the cache cleanly.
 DEFAULT_LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
-DEFAULT_API_MODEL = "text-embedding-3-small"
+
+# API backend defaults are provider-aware. Native OpenAI gets its own embedding
+# model; OpenRouter gets baai/bge-m3 — an open-source BGE family model (same
+# vendor as our local default), 8K context, ~$0.01/M tokens through OpenRouter,
+# and routable via OpenRouter's /v1/embeddings endpoint (unlike OpenAI's
+# text-embedding-* IDs which OpenRouter currently does not relay).
+DEFAULT_API_MODEL_OPENAI = "text-embedding-3-small"
+DEFAULT_API_MODEL_OPENROUTER = "baai/bge-m3"
+
+
+def _default_api_model_for(base_url: Optional[str]) -> str:
+    """Pick a sensible embedding model id for an OpenAI-compatible base URL.
+
+    We use base_url as the provider signal because that's what's already
+    resolved by ``config.resolve_llm_config`` from the user's key prefix
+    (``sk-or-...`` → OpenRouter, ``sk-...`` → OpenAI native).
+    """
+    if base_url and "openrouter" in base_url.lower():
+        return DEFAULT_API_MODEL_OPENROUTER
+    return DEFAULT_API_MODEL_OPENAI
 
 
 # ── backends ────────────────────────────────────────────────────────────────
@@ -197,11 +223,10 @@ def _try_make_api_backend(
     if not cfg:
         dbg.trace("audit.rag", "no LLM API key resolved for embeddings")
         return None
-    model = (
-        DEFAULT_API_MODEL
-        if (not model_hint or model_hint == "auto")
-        else model_hint
-    )
+    if not model_hint or model_hint == "auto":
+        model = _default_api_model_for(cfg.base_url)
+    else:
+        model = model_hint
     client_kwargs: dict = {"api_key": cfg.api_key}
     if cfg.base_url:
         client_kwargs["base_url"] = cfg.base_url

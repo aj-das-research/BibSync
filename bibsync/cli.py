@@ -613,10 +613,10 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
     "--embedding-model",
     default="auto",
     show_default=True,
-    help="Tier 2 only: model name for the embeddings call. "
-    "'auto' picks BAAI/bge-small-en-v1.5 for the local backend and "
-    "text-embedding-3-small for the API backend. "
-    "Override only if you need a specific model.",
+    help="Tier 2 only: model name for the embeddings call. 'auto' resolves "
+    "per-backend: BAAI/bge-small-en-v1.5 for local; for the API backend it "
+    "picks baai/bge-m3 on OpenRouter (sk-or-...) and text-embedding-3-small "
+    "on OpenAI (sk-...). Override only if you need a specific model.",
 )
 @click.option(
     "--cache-dir",

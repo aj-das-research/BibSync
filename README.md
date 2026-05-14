@@ -204,7 +204,9 @@ bibsync audit . --bib references.bib
 pip install -e ".[audit-rag]"
 bibsync audit . --bib references.bib --tier 2 --rag-top-k 5
 
-# Force the hosted (OpenAI-compatible) embeddings backend instead:
+# Force the hosted embeddings backend instead. The default model is
+# provider-aware: OpenRouter keys → baai/bge-m3 (open-source, $0.01/M tokens);
+# OpenAI keys → text-embedding-3-small.
 bibsync audit . --bib references.bib --tier 2 --embedding-backend api
 
 # Auto-remove hallucinated cites (replaced with a marker comment preserving the LLM's reasoning)

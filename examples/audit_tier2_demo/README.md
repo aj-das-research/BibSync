@@ -81,17 +81,16 @@ via ONNX Runtime. The first run downloads the model (~80 MB) into the fastembed
 cache; subsequent runs load it from disk in under a second. Retrieval quality
 is on par with OpenAI's `text-embedding-3-small` for short academic claims.
 
-If you'd rather use a hosted API endpoint (OpenAI native; some OpenRouter
-routes), pass `--embedding-backend api`. The system will issue
-OpenAI-compatible `embeddings` calls against whichever LLM provider you've
-configured. Watch for `audit.rag api backend init failed` or `embed call
-failed` in `--debug` traces if the provider doesn't route embeddings — in
-that case fall back to the local backend (the default), or configure a
-dedicated key:
+If you'd rather use a hosted API endpoint, pass `--embedding-backend api`.
+The system issues OpenAI-compatible `/embeddings` calls and picks a
+**provider-aware default model** based on your configured LLM key:
 
-```bash
-bibsync config set openai_key sk-...   # any OpenAI-compatible embeddings endpoint
-```
+| Configured key | Default API embedding model | Why |
+|---|---|---|
+| `openrouter_key` (`sk-or-...`) | **`baai/bge-m3`** | Open-source BGE family, 8K ctx, ~$0.01 / 1M tokens, routable via OpenRouter's `/v1/embeddings` (unlike `text-embedding-*` which OpenRouter currently does not relay). |
+| `openai_key` (`sk-...`) | **`text-embedding-3-small`** | OpenAI native default. |
 
-Cache invalidates automatically when the effective model OR backend changes,
-so switching between `local` and `api` never mixes vector spaces.
+Override the default with `--embedding-model <id>` (e.g. `--embedding-model
+qwen/qwen3-embedding-8b` for max-quality OpenRouter retrieval). Cache
+invalidates automatically when the effective model OR backend changes, so
+switching never mixes vector spaces.
