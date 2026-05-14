@@ -578,6 +578,46 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
 @_bib_option
 @_model_option
 @click.option(
+    "--tier",
+    type=click.IntRange(0, 2),
+    default=1,
+    show_default=True,
+    help="Evidence depth for each citation: "
+    "0 = metadata only (fastest, catches gross topic mismatches), "
+    "1 = also fetch the paper's abstract from arXiv/Semantic Scholar/Crossref "
+    "(catches misattributions where the title is on-topic but the actual "
+    "contribution differs), "
+    "2 = also download the open-access PDF, chunk + embed it, and retrieve the "
+    "passages most relevant to each claim (catches specific numerical / "
+    "factual mismatches; requires pypdf and an embeddings-capable API key).",
+)
+@click.option(
+    "--rag-top-k",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Tier 2 only: number of top-similarity chunks to retrieve per claim.",
+)
+@click.option(
+    "--embedding-model",
+    default="text-embedding-3-small",
+    show_default=True,
+    help="Tier 2 only: model name for the embeddings call.",
+)
+@click.option(
+    "--cache-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Directory for paper-content / PDF / embedding caches. Defaults to the "
+    "platform user-cache dir (e.g. ~/Library/Caches/bibsync on macOS).",
+)
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="Bypass on-disk caches; re-fetch abstracts and re-embed chunks.",
+)
+@click.option(
     "--fix",
     "do_fix",
     is_flag=True,
@@ -605,6 +645,11 @@ def audit_cmd(
     project_root: Path,
     bib_path: Path,
     openai_model: Optional[str],
+    tier: int,
+    rag_top_k: int,
+    embedding_model: str,
+    cache_dir: Optional[Path],
+    no_cache: bool,
     do_fix: bool,
     confidence_floor: float,
     delay: float,
@@ -634,16 +679,29 @@ def audit_cmd(
             "Set one with:\n  [bold]bibsync config set openrouter_key sk-or-...[/bold]"
         )
         sys.exit(2)
-    console.print(f"[dim]Using {llm_cfg.provider} ({llm_cfg.model}) for citation audit[/dim]")
+    tier_blurb = {
+        0: "metadata only",
+        1: "+ abstract from arXiv / Semantic Scholar / Crossref",
+        2: "+ PDF chunks via RAG retrieval",
+    }[tier]
+    console.print(
+        f"[dim]Using {llm_cfg.provider} ({llm_cfg.model}) "
+        f"for citation audit — tier {tier} ({tier_blurb})[/dim]"
+    )
 
     report = audit_mod.audit_project_sync(
         project_root,
         bib_path,
+        tier=tier,
         model=openai_model,
         api_key=llm_cfg.api_key,
         delay_seconds=delay,
         fix=do_fix,
         confidence_floor=confidence_floor,
+        cache_dir=cache_dir,
+        no_cache=no_cache,
+        rag_top_k=rag_top_k,
+        embedding_model=embedding_model,
     )
 
     if not report.checks:
@@ -656,6 +714,7 @@ def audit_cmd(
     )
     t.add_column("Cite key", style="bold")
     t.add_column("Status")
+    t.add_column("Evidence", justify="center")
     t.add_column("Location")
     t.add_column("Conf.", justify="right")
     t.add_column("Claim → paper", overflow="fold")
@@ -666,6 +725,7 @@ def audit_cmd(
         "unverifiable": "[yellow]unverifiable[/yellow]",
         "missing_in_bib": "[red]missing_in_bib[/red]",
     }
+    tier_labels = {0: "meta", 1: "abs", 2: "RAG"}
     for c in report.checks:
         loc = f"{c.file.name}:{c.line}"
         if c.bib_entry:
@@ -678,9 +738,13 @@ def audit_cmd(
         claim_preview = c.claim_text[:120] + ("…" if len(c.claim_text) > 120 else "")
         claim_vs_paper = f"[dim]claim:[/dim] {claim_preview}\n[dim]paper:[/dim] {paper_summary}"
         reasoning_cell = c.reasoning + ("\n[green](fixed)[/green]" if c.fixed else "")
+        ev_label = tier_labels.get(c.evidence_tier, str(c.evidence_tier))
+        if c.evidence_tier == 2 and c.n_chunks:
+            ev_label = f"RAG×{c.n_chunks}"
         t.add_row(
             c.cite_key,
             status_styles.get(c.status, c.status),
+            ev_label,
             loc,
             f"{c.confidence:.2f}" if c.confidence else "—",
             claim_vs_paper,

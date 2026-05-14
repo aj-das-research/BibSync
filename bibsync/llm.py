@@ -1013,6 +1013,54 @@ Return a single JSON object:
 """
 
 
+_AUDIT_TIER1_SUFFIX = """\
+
+═════════════════════════════════════════════════════════════════════
+EVIDENCE: paper ABSTRACT (use this as the primary source of truth)
+═════════════════════════════════════════════════════════════════════
+The user provides the cited paper's abstract. Use it as the PRIMARY evidence,
+not just the title. An abstract is the most reliable single summary of what the
+paper actually claims.
+
+When the abstract is available:
+  • If the abstract clearly addresses the claim → supports=true (high confidence).
+  • If the abstract is on the same general topic but says nothing about the
+    specific point the claim attributes → supports=false (medium confidence,
+    flag as unsupported rather than hallucinated).
+  • If the abstract describes a DIFFERENT topic entirely → supports=false (high
+    confidence — clear misattribution).
+
+Cite specific phrases from the abstract in your reasoning (one short quote is
+enough). This makes the verdict auditable.
+"""
+
+_AUDIT_TIER2_SUFFIX = """\
+
+═════════════════════════════════════════════════════════════════════
+EVIDENCE: paper ABSTRACT + retrieved CHUNKS from the paper's full text
+═════════════════════════════════════════════════════════════════════
+You receive both the paper's abstract AND several excerpts retrieved by semantic
+search against the prose claim. The excerpts are direct evidence; the abstract
+is for context.
+
+When evaluating:
+  • If a retrieved chunk directly supports the claim (e.g. mentions the same
+    method, dataset, finding, or number) → supports=true with high confidence.
+  • If the chunks discuss the topic but don't mention the specific point in the
+    claim → supports=false with medium confidence ("unsupported by the
+    retrieved evidence").
+  • If retrieved chunks directly CONTRADICT the claim (e.g. paper reports a
+    different number than the claim states) → supports=false with high
+    confidence ("misattribution").
+  • If chunks are off-topic from the claim → fall back to abstract-level
+    evaluation.
+
+In your reasoning, quote the most relevant retrieved chunk by its page
+reference (e.g. "p.3 says ..."). Be specific. The user is grading the
+verdict against the actual paper.
+"""
+
+
 def audit_citation(
     claim_text: str,
     cited_paper_title: str,
@@ -1020,14 +1068,33 @@ def audit_citation(
     cited_paper_year: Optional[int] = None,
     cited_paper_venue: str = "",
     *,
+    abstract: Optional[str] = None,
+    retrieved_chunks: Optional[list[str]] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> CitationAudit:
     """Audit whether the cited paper supports the surrounding prose claim.
 
-    Used by ``bibsync audit`` to detect hallucinated / misattributed citations.
-    Conservative on failure — any error returns ``supports=True`` with confidence 0
-    so the caller falls back to "unverifiable" rather than deleting a real citation.
+    Three evidence tiers, selected automatically by which arguments are populated:
+
+      * Tier 0 (default — neither ``abstract`` nor ``retrieved_chunks``):
+        metadata-only. LLM judges by title + authors + year + venue and its own
+        training-data knowledge of famous papers.
+      * Tier 1 (``abstract`` provided): LLM additionally grounds its verdict in
+        the paper's abstract — catches misattributions where the title is on-topic
+        but the abstract reveals a different actual contribution.
+      * Tier 2 (``retrieved_chunks`` provided): LLM additionally grounds its
+        verdict in passages retrieved from the paper's full text via semantic
+        search against the claim. Catches specific numerical / factual mismatches
+        that even the abstract doesn't disambiguate.
+
+    The prompt is assembled tier-aware: extra evidence is added to the system
+    message with explicit instructions on how to weight it. The user-message
+    payload carries the evidence itself.
+
+    Conservative on failure: any LLM/API error returns ``supports=True`` with
+    confidence 0 so the caller falls back to "unverifiable" rather than
+    deleting a real citation.
     """
     try:
         client, model_id = _get_client_and_model(api_key, model)
@@ -1035,31 +1102,49 @@ def audit_citation(
         dbg.trace("llm.audit", "ERR client unavailable", error=str(e))
         return CitationAudit(True, 0.0, f"LLM client unavailable: {e}")
 
+    tier = 2 if retrieved_chunks else (1 if abstract else 0)
+    system = _AUDIT_CITATION_SYSTEM
+    if tier == 1:
+        system = _AUDIT_CITATION_SYSTEM + _AUDIT_TIER1_SUFFIX
+    elif tier == 2:
+        system = _AUDIT_CITATION_SYSTEM + _AUDIT_TIER1_SUFFIX + _AUDIT_TIER2_SUFFIX
+
     dbg.trace(
         "llm.audit",
         "calling",
         model=model_id,
+        tier=tier,
         claim=claim_text,
         paper_title=cited_paper_title,
         paper_authors=cited_paper_authors,
         paper_year=cited_paper_year,
+        has_abstract=bool(abstract),
+        n_chunks=len(retrieved_chunks or []),
     )
 
-    user_msg = (
-        "Does the cited paper SUPPORT the claim? Return JSON.\n\n"
-        f"CLAIM (academic prose containing the citation):\n  {claim_text!r}\n\n"
-        "CITED PAPER (from the user's .bib entry):\n"
-        f"  title:   {cited_paper_title!r}\n"
-        f"  authors: {cited_paper_authors!r}\n"
-        f"  year:    {cited_paper_year}\n"
-        f"  venue:   {cited_paper_venue!r}\n"
-    )
+    user_parts = [
+        "Does the cited paper SUPPORT the claim? Return JSON.\n",
+        f"CLAIM (academic prose containing the citation):\n  {claim_text!r}\n",
+        "CITED PAPER (from the user's .bib entry):",
+        f"  title:   {cited_paper_title!r}",
+        f"  authors: {cited_paper_authors!r}",
+        f"  year:    {cited_paper_year}",
+        f"  venue:   {cited_paper_venue!r}",
+    ]
+    if abstract:
+        user_parts.append("\nABSTRACT (Tier-1 evidence):\n" + abstract.strip())
+    if retrieved_chunks:
+        user_parts.append("\nRETRIEVED CHUNKS from the paper's full text (Tier-2 evidence):")
+        for i, chunk in enumerate(retrieved_chunks, 1):
+            user_parts.append(f"\n[chunk {i}]\n{chunk.strip()}")
+
+    user_msg = "\n".join(user_parts)
 
     try:
         resp = client.chat.completions.create(
             model=model_id,
             messages=[
-                {"role": "system", "content": _AUDIT_CITATION_SYSTEM},
+                {"role": "system", "content": system},
                 {"role": "user", "content": user_msg},
             ],
             temperature=0,
@@ -1086,6 +1171,7 @@ def audit_citation(
     dbg.trace(
         "llm.audit",
         "verdict",
+        tier=tier,
         supports=verdict.supports,
         conf=round(verdict.confidence, 2),
         reason=verdict.reasoning,

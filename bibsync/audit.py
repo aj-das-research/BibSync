@@ -26,9 +26,12 @@ import bisect
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from . import bibtex, dbg, llm
+
+if TYPE_CHECKING:
+    from .audit_sources import PaperContent
 
 # Match any \cite-family command — same regex as scanner.py.
 _CITE_RE = re.compile(r"\\(?:no)?cite\w*\s*(?:\[[^\]]*\])*\s*\{([^}]+)\}")
@@ -58,6 +61,10 @@ class CitationCheck:
     confidence: float = 0.0
     reasoning: str = ""
     fixed: bool = False  # True if --fix replaced the \cite{} in the .tex
+    # Tier-1+ enrichment
+    evidence_tier: int = 0  # 0 = metadata only, 1 = abstract used, 2 = chunks used
+    paper_content: Optional["PaperContent"] = None  # what audit_sources returned
+    n_chunks: int = 0  # how many retrieved chunks were sent to the LLM (tier 2)
 
 
 @dataclass
@@ -174,21 +181,46 @@ async def audit_project(
     project_root: Path,
     bib_file: Path,
     *,
+    tier: int = 1,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
     delay_seconds: float = 0.5,
     fix: bool = False,
     confidence_floor: float = 0.7,
+    cache_dir: Optional[Path] = None,
+    no_cache: bool = False,
+    rag_top_k: int = 5,
+    embedding_model: str = "text-embedding-3-small",
+    ss_api_key: Optional[str] = None,
 ) -> AuditReport:
     """Audit every ``\\cite{}`` in ``project_root`` against the ``bib_file``.
 
-    Confidence floor: only mark a citation as ``hallucinated`` when the LLM
-    confidently judges supports=false. Weaker no-support verdicts fall into
-    ``unverifiable`` so we don't trigger ``--fix`` on uncertain calls.
+    ``tier`` selects the evidence depth fed to the LLM judge:
+
+      * 0 — metadata only (title + authors + year + venue from the .bib entry).
+        Cheap, catches gross topic mismatches.
+      * 1 — also fetch the paper's abstract from arXiv / Semantic Scholar /
+        Crossref and include it in the prompt. Catches misattributions where
+        the title is on-topic but the abstract reveals a different actual
+        contribution. Adds ~1 HTTP call per unique paper (cached).
+      * 2 — also download the paper PDF (if open-access) via the source's
+        ``pdf_url``, extract text, chunk it, embed the chunks, retrieve the
+        top-K most-claim-relevant chunks, and include them as evidence.
+        Catches specific numerical / factual mismatches. Adds PDF download
+        plus an embedding call per paper (both cached).
+
+    Higher tiers gracefully degrade when content isn't available — e.g., a
+    paper not on arXiv/SS/Crossref still gets a Tier-0 audit.
     """
     project_root = project_root.resolve()
     bib_file = bib_file.resolve()
-    dbg.trace("audit.start", project=str(project_root), bib=str(bib_file), fix=fix)
+    dbg.trace(
+        "audit.start",
+        project=str(project_root),
+        bib=str(bib_file),
+        tier=tier,
+        fix=fix,
+    )
 
     report = AuditReport(project_root=project_root, bib_file=bib_file)
     db = bibtex.load(bib_file)
@@ -204,10 +236,33 @@ async def audit_project(
         unique_keys=len({c.cite_key for c in checks}),
     )
 
-    # Cache LLM verdicts by (cite_key, claim_text) so the same paper cited for the
-    # same claim in two files only spends one LLM call.
+    # Cache directories (used for Tier 1+ paper content, Tier 2 PDFs/embeddings).
+    if cache_dir is None:
+        from platformdirs import user_cache_dir
+        cache_dir = Path(user_cache_dir("bibsync", "bibsync"))
+    cache_dir = Path(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    paper_cache = None
+    if tier >= 1:
+        from .audit_sources import PaperContentCache  # lazy: keeps tier-0 cheap
+        paper_cache = PaperContentCache(cache_dir)
+
+    pdf_cache = None
+    embed_store = None
+    if tier >= 2:
+        from .audit_sources.pdf import PdfCache
+        from .audit_rag import EmbeddingStore
+        pdf_cache = PdfCache(cache_dir)
+        embed_store = EmbeddingStore(cache_dir, model=embedding_model, api_key=api_key)
+
+    # Cache enrichment + verdicts per cite-key so multiple usages of the same key
+    # in different claims still only fetch the paper / embed it / get its abstract
+    # once per run.
+    paper_content_by_key: dict[str, Optional["PaperContent"]] = {}
+    paper_chunks_by_key: dict[str, list] = {}
     verdict_cache: dict[tuple[str, str], llm.CitationAudit] = {}
-    judged_keys: set[str] = set()
+    paced_keys: set[str] = set()
 
     for check in checks:
         # Step 1 — bib lookup.
@@ -221,10 +276,75 @@ async def audit_project(
         check.bib_entry = entry
 
         title, authors, year, venue = _entry_to_audit_inputs(entry)
-        cache_key = (check.cite_key, check.claim_text)
 
-        # Step 2 — LLM audit (cached).
-        if cache_key in verdict_cache:
+        # Step 2 — Tier 1+: fetch abstract via the source fallback chain.
+        abstract: Optional[str] = None
+        content = None
+        if tier >= 1:
+            if check.cite_key in paper_content_by_key:
+                content = paper_content_by_key[check.cite_key]
+            else:
+                from .audit_sources import fetch_paper_content
+                first_author = ""
+                if authors:
+                    first = authors.split(" and ")[0]
+                    first_author = (
+                        first.split(",")[0] if "," in first else (first.split()[-1] if first.split() else "")
+                    ).strip()
+                content = await fetch_paper_content(
+                    title=title,
+                    first_author=first_author or None,
+                    year=year,
+                    doi=(entry.get("doi") or None),
+                    cache=paper_cache,
+                    no_cache=no_cache,
+                    ss_api_key=ss_api_key,
+                )
+                paper_content_by_key[check.cite_key] = content
+            if content and content.abstract:
+                abstract = content.abstract
+        check.paper_content = content
+
+        # Step 3 — Tier 2: PDF → chunks → retrieve top-K relevant chunks for THIS claim.
+        retrieved_chunk_texts: Optional[list[str]] = None
+        if tier >= 2 and content and content.pdf_url and pdf_cache and embed_store:
+            from .audit_sources.pdf import get_paper_text
+            from .audit_rag import chunk_text
+
+            paper_key = content.stable_key()
+            if check.cite_key in paper_chunks_by_key:
+                chunks = paper_chunks_by_key[check.cite_key]
+            else:
+                text = await get_paper_text(paper_key, content.pdf_url, pdf_cache)
+                chunks = chunk_text(text, paper_key) if text else []
+                paper_chunks_by_key[check.cite_key] = chunks
+
+            if chunks:
+                top = await embed_store.retrieve(
+                    query=check.claim_text,
+                    paper_key=paper_key,
+                    chunks=chunks,
+                    top_k=rag_top_k,
+                )
+                retrieved_chunk_texts = [
+                    f"[p.{c.page or '?'}] {c.text}" for c, _score in top
+                ]
+                check.n_chunks = len(retrieved_chunk_texts)
+
+        # Record what tier we actually achieved for this check (may be lower than
+        # the requested ``tier`` if the paper wasn't on arXiv/SS/Crossref).
+        if retrieved_chunk_texts:
+            check.evidence_tier = 2
+        elif abstract:
+            check.evidence_tier = 1
+        else:
+            check.evidence_tier = 0
+
+        # Step 4 — LLM audit (verdict cached by (cite_key, claim) pair).
+        cache_key = (check.cite_key, check.claim_text)
+        if cache_key in verdict_cache and not retrieved_chunk_texts:
+            # Tier 2 cache by (key, claim) is correct: same claim ⇒ same retrieved
+            # chunks ⇒ same verdict. But we re-run if tier-2 to surface trace.
             verdict = verdict_cache[cache_key]
             dbg.trace("audit.check", "cache hit", key=check.cite_key)
         else:
@@ -234,14 +354,15 @@ async def audit_project(
                 cited_paper_authors=authors,
                 cited_paper_year=year,
                 cited_paper_venue=venue,
+                abstract=abstract,
+                retrieved_chunks=retrieved_chunk_texts,
                 model=model,
                 api_key=api_key,
             )
             verdict_cache[cache_key] = verdict
-            # Polite pacing only when we actually issue a new LLM call.
-            if check.cite_key not in judged_keys and delay_seconds > 0:
+            if check.cite_key not in paced_keys and delay_seconds > 0:
                 await asyncio.sleep(delay_seconds)
-            judged_keys.add(check.cite_key)
+            paced_keys.add(check.cite_key)
 
         check.confidence = verdict.confidence
         check.reasoning = verdict.reasoning
@@ -256,11 +377,12 @@ async def audit_project(
             "audit.check",
             check.status,
             key=check.cite_key,
+            tier=check.evidence_tier,
             conf=round(check.confidence, 2),
             line=check.line,
         )
 
-    # Step 3 — Optional --fix: replace hallucinated cite calls with marker comments.
+    # Step 5 — Optional --fix: replace hallucinated cite calls with marker comments.
     if fix:
         _apply_fixes(report)
 

@@ -30,10 +30,17 @@ dependencies = [
     "rapidfuzz>=3.0",
     "playwright>=1.40",
     "platformdirs>=4.0",
+    # Tier-1+ audit (fetch paper abstracts from arXiv / Semantic Scholar / Crossref).
+    # Tier-2 PDF download also uses httpx.
+    "httpx>=0.25",
 ]
 
 [project.optional-dependencies]
 openai = ["openai>=1.10"]
+# Tier-2 audit: PDF extraction (pypdf). Embeddings are issued via the openai SDK
+# already installed under [openai]; install both to enable Tier 2 fully:
+#   pip install -e ".[openai,audit-rag]"
+audit-rag = ["pypdf>=4.0"]
 dev = ["pytest>=7", "pytest-asyncio>=0.21", "ruff>=0.4"]
 
 [project.scripts]

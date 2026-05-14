@@ -176,7 +176,41 @@ These exist for completeness; you typically only need `fix`:
 | `bibsync search "<query>"` | Preview Scholar results without writing. |
 | `bibsync extract <paper.tex>` | Given LLM-drafted prose with `\cite{key}` placeholders, decode each key from context and populate the `.bib`. |
 | `bibsync repair <bibitems.tex>` | Convert legacy `\bibitem{...}` blocks to BibTeX. |
-| `bibsync suggest <paper.tex>` | Suggest citations for paragraphs that have none. Experimental — heuristic-only matching, no LLM verification yet, so accept suggestions with care. |
+| `bibsync suggest <paper.tex>` | Read prose without citations, propose `\cite{}` per claim (LLM identifies the canonical paper from world knowledge, Scholar confirms). |
+| `bibsync audit <dir> [--tier N]` | Verify every existing `\cite{}` actually supports its claim. Three evidence tiers; pass `--fix` to remove hallucinated citations. See below. |
+
+### `bibsync audit` — citation verification engine
+
+For every `\cite{key}` in your project, audit checks whether the cited paper actually
+supports the surrounding prose claim. Three evidence tiers, configurable per run:
+
+| Tier | What it does | Catches | Extra latency |
+|---|---|---|---|
+| **0** | metadata only — title + authors + year + venue from the `.bib` entry | gross topic mismatches (e.g. a CV paper cited for an NLP claim) | one LLM call per (claim, paper) |
+| **1** (default) | also fetches the paper's **abstract** from arXiv → Semantic Scholar → Crossref (with on-disk cache) | misattributions where the title is on-topic but the actual contribution differs | + one HTTP call per unique paper, cached |
+| **2** | also downloads the open-access **PDF**, chunks it, embeds the chunks, and retrieves the **top-K most claim-relevant passages** for the LLM to ground its verdict in | specific numerical / factual mismatches the abstract doesn't disambiguate | + PDF download + embeddings call per paper, both cached |
+
+Higher tiers gracefully degrade per-citation: a paper not on arXiv/SS/Crossref still
+gets a Tier-0 audit; a paper with no open-access PDF still gets a Tier-1 audit.
+
+```bash
+# Tier 1 (default): abstract-grounded verdicts for everything findable
+bibsync audit . --bib references.bib
+
+# Tier 2: full RAG against the PDFs (needs pypdf and an embeddings-capable API key)
+pip install -e ".[openai,audit-rag]"
+bibsync audit . --bib references.bib --tier 2 --rag-top-k 5
+
+# Auto-remove hallucinated cites (replaced with a marker comment preserving the LLM's reasoning)
+bibsync audit . --bib references.bib --fix
+
+# Demo: 4 verified, 2 hallucinated, 1 missing_in_bib, 1 commented-out (ignored)
+bibsync audit examples/audit_demo --bib examples/audit_demo/references.bib
+```
+
+The report shows the evidence tier each citation was actually verified at (`meta`,
+`abs`, or `RAG×N` where N is the retrieved chunk count) so you can see at a glance
+whether the verdict was based on the abstract or the actual paper text.
 
 ## File layout
 
@@ -184,7 +218,10 @@ These exist for completeness; you typically only need `fix`:
 BibSync/
 ├── bibsync/
 │   ├── cli.py          # Click subcommands
-│   ├── fix.py          # main pipeline: LLM-verified bib repair + .tex sync
+│   ├── fix.py          # bib repair + .tex sync (LLM-verified per-paper match)
+│   ├── audit.py        # citation verification engine (tiers 0/1/2)
+│   ├── audit_sources/  # arXiv / Semantic Scholar / Crossref / PDF / cache
+│   ├── audit_rag.py    # chunking + embeddings + retrieval for Tier-2 audit
 │   ├── llm.py          # OpenAI/OpenRouter client, prompts, verify_match agent
 │   ├── scholar.py      # Playwright scraper (persistent profile, CAPTCHA-aware)
 │   ├── picker.py       # Canonical-version selection
