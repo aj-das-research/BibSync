@@ -1,0 +1,39 @@
+\section{Introduction}
+
+% ─── CLAIMS WHOSE TRUTH REQUIRES FULL-TEXT EVIDENCE ──────────────────────────
+% Every \cite{} below points to a real arXiv paper. Run with --tier 2 and the
+% audit pipeline will: (a) fetch each paper's arXiv metadata + abstract,
+% (b) download the open-access PDF, (c) extract page-aware text, (d) chunk it
+% and embed the chunks, (e) retrieve the top-K passages most relevant to each
+% claim, and (f) ask the LLM to ground its verdict in those passages.
+
+% ── CLAIM 1 — TRUE (verified) ─────────────────────────────────────────────────
+% The Vaswani 2017 paper IS the Transformer paper and IS about multi-head
+% self-attention replacing recurrence. RAG should retrieve passages stating
+% exactly this and Tier 2 should produce supports=true with high confidence.
+The Transformer architecture introduced multi-head self-attention as a
+replacement for recurrence in sequence
+modeling~\cite{vaswani2017attention}.
+
+% ── CLAIM 2 — TRUE but the specific number must come from the paper (verified) ─
+% BERT-base really does have 12 transformer layers and 110M parameters — these
+% numbers appear in the BERT paper's text (and in its abstract). RAG should
+% surface the chunk where Devlin et al. specify the architecture sizes.
+BERT-base has 12 transformer layers and 110M parameters, and was pretrained on
+BookCorpus and English Wikipedia~\cite{devlin2019bert}.
+
+% ── CLAIM 3 — HALLUCINATED, numerical (Tier 2 should flag) ─────────────────────
+% The GPT-3 paper does not claim 86.5% on MedQA. That number is from later
+% medical-domain models (Med-PaLM 2). RAG should retrieve chunks discussing
+% language-model few-shot evaluation and find NO MedQA / 86.5% mention.
+% Tier 0 might falsely verify this (GPT-3 paper, plausible-sounding claim).
+% Tier 2 should reject with reasoning citing the retrieved chunks.
+GPT-3 achieves 86.5\% accuracy on the MedQA medical question-answering
+benchmark~\cite{brown2020language}.
+
+% ── CLAIM 4 — HALLUCINATED, easy (any tier should flag) ────────────────────────
+% ResNet-50 has ~25M parameters, not 100 billion. This is a wild misattribution
+% that even Tier 0 should catch via topic mismatch, but it's useful as a
+% sanity-check.
+ResNet-50, trained with 100 billion parameters, achieved state-of-the-art
+results on protein structure prediction~\cite{he2016resnet}.
