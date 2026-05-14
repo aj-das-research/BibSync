@@ -137,6 +137,41 @@ def _has_existing_cite(paragraph: str) -> bool:
     return bool(_CITE_PRESENCE_RE.search(paragraph))
 
 
+def _claim_sentence_around_anchor(paragraph: str, anchor: str) -> str:
+    """Return the sentence in ``paragraph`` that contains ``anchor``.
+
+    This is the prose claim Filter D should ground against — NOT the anchor
+    itself. Passing just the anchor (often a 1-2 word phrase like 'GPT-3') to
+    ``audit_citation`` collapses the question to "does this paper support the
+    term 'GPT-3'?" — trivially true and useless for grounding. The actual
+    misattribution we want to catch lives in the full sentence (e.g.
+    "GPT-3 achieves 86.5% on MedQA" → the GPT-3 paper does NOT support that).
+
+    Mirrors ``audit._extract_claim``'s sentence-boundary logic, but uses the
+    anchor's position in the paragraph as the pivot. Falls back to the whole
+    paragraph if the anchor isn't found (e.g. case-folded or stripped).
+    """
+    if not anchor:
+        return paragraph.strip()
+    idx = paragraph.find(anchor)
+    if idx < 0:
+        # Try a case-insensitive search before giving up — anchors sometimes
+        # come back lower-cased from the LLM.
+        lower = paragraph.lower()
+        idx = lower.find(anchor.lower())
+        if idx < 0:
+            return paragraph.strip()
+    # Walk back to start of previous sentence (or paragraph start).
+    start = 0
+    for m in re.finditer(r"(?:[.!?]\s+)|(?:\n\s*\n)", paragraph[:idx]):
+        start = m.end()
+    # Walk forward to next sentence end.
+    after = paragraph[idx:]
+    end_m = re.search(r"[.!?](?:\s|\n|$)", after)
+    end = idx + (end_m.end() if end_m else len(after))
+    return paragraph[start:end].strip()
+
+
 
 
 def _queries_from_identification(ident: llm.IdentifiedPaper) -> list[str]:
@@ -541,9 +576,16 @@ async def _resolve_suggestion(
             # Filter D — grounding gate (Tier-1/2 verification against the actual
             # paper's abstract / full-text chunks). Only runs when --verify-tier ≥ 1.
             # A no-op when verify_tier=0, so Filter C remains the only gate by default.
+            #
+            # CRITICAL: ground against the FULL SENTENCE containing the anchor,
+            # not the anchor itself. The anchor is a 1-2 word phrase ('GPT-3');
+            # the misattribution the gate is supposed to catch lives in the
+            # surrounding prose ('GPT-3 achieves 86.5% on MedQA'). Mirrors how
+            # the audit pipeline grounds on the sentence containing the \cite{}.
+            grounded_claim = _claim_sentence_around_anchor(paragraph, suggestion.anchor)
             grounding = await _ground_candidate(
                 candidate=candidate,
-                claim_text=suggestion.anchor,
+                claim_text=grounded_claim,
                 verify_tier=verify_tier,
                 rag_top_k=rag_top_k,
                 grounding_floor=grounding_floor,
