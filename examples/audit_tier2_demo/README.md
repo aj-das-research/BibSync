@@ -32,7 +32,14 @@ in the project root README under "Try Tier 2") for the full commands.
 Short version:
 
 ```bash
-pip install -e ".[openai,audit-rag]"
+# Local-first install: open-source embeddings (fastembed), no API key needed
+# for the embedding step. You still need an LLM key for completions — any
+# OpenRouter / OpenAI / compatible key works.
+pip install -e ".[audit-rag]"
+
+# (Optional) If you also want the OpenAI-compatible embeddings backend as a
+# fallback, install the [openai] extra too:
+#   pip install -e ".[openai,audit-rag]"
 
 # Force a fresh fetch (no caches)
 rm -rf "$HOME/Library/Caches/bibsync"   # macOS path; see XDG cache on Linux
@@ -41,6 +48,11 @@ bibsync --debug audit examples/audit_tier2_demo \
                       --bib examples/audit_tier2_demo/references.bib \
                       --tier 2 --rag-top-k 5 \
                       2> /tmp/tier2.log
+
+# Explicit-backend variants:
+#   --embedding-backend local   # force fastembed (BAAI/bge-small-en-v1.5)
+#   --embedding-backend api     # force OpenAI-compatible endpoint
+#   --embedding-backend auto    # default: local-first, API as fallback
 
 # Inspect what the pipeline actually did
 grep audit.fetch /tmp/tier2.log   # source lookups (arxiv/SS/crossref)
@@ -62,16 +74,24 @@ puts everything back.
 
 ## Note on embeddings
 
-Tier 2 calls the OpenAI-compatible `embeddings` endpoint on whichever LLM
-provider you've configured. **OpenRouter does not currently route to all
-embedding models** — if your `bibsync config show` resolves to an OpenRouter
-key and Tier 2 silently degrades to Tier 1 (look for `audit.rag embeddings
-request failed` in the trace), set an OpenAI key just for embeddings:
+**Default: fully local, open-source, no API key needed.** Tier 2 ships with
+[`fastembed`](https://github.com/qdrant/fastembed) under `[audit-rag]`, which
+loads [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5)
+via ONNX Runtime. The first run downloads the model (~80 MB) into the fastembed
+cache; subsequent runs load it from disk in under a second. Retrieval quality
+is on par with OpenAI's `text-embedding-3-small` for short academic claims.
+
+If you'd rather use a hosted API endpoint (OpenAI native; some OpenRouter
+routes), pass `--embedding-backend api`. The system will issue
+OpenAI-compatible `embeddings` calls against whichever LLM provider you've
+configured. Watch for `audit.rag api backend init failed` or `embed call
+failed` in `--debug` traces if the provider doesn't route embeddings — in
+that case fall back to the local backend (the default), or configure a
+dedicated key:
 
 ```bash
-bibsync config set openai_key sk-...      # OpenAI native
-# or use a Together / DeepInfra / Fireworks key configured for embeddings
+bibsync config set openai_key sk-...   # any OpenAI-compatible embeddings endpoint
 ```
 
-The system will use OpenAI for embeddings and your existing OpenRouter (or
-whatever) key for LLM completions, as configured.
+Cache invalidates automatically when the effective model OR backend changes,
+so switching between `local` and `api` never mixes vector spaces.

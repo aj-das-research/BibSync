@@ -37,10 +37,17 @@ dependencies = [
 
 [project.optional-dependencies]
 openai = ["openai>=1.10"]
-# Tier-2 audit: PDF extraction (pypdf). Embeddings are issued via the openai SDK
-# already installed under [openai]; install both to enable Tier 2 fully:
-#   pip install -e ".[openai,audit-rag]"
-audit-rag = ["pypdf>=4.0"]
+# Tier-2 audit:
+#   - pypdf:    PDF text extraction.
+#   - fastembed: local ONNX-based embeddings (BAAI/bge-small-en-v1.5 by default).
+#                Fully offline, no API key needed, ~80 MB model cached after
+#                first use. This is the open-source default; an OpenAI-
+#                compatible API embedding backend is also available via the
+#                openai SDK installed under [openai] when you pass
+#                --embedding-backend api.
+#   pip install -e ".[audit-rag]"            # local-only (no API key required)
+#   pip install -e ".[openai,audit-rag]"     # adds API backend as a fallback
+audit-rag = ["pypdf>=4.0", "fastembed>=0.3"]
 dev = ["pytest>=7", "pytest-asyncio>=0.21", "ruff>=0.4"]
 
 [project.scripts]

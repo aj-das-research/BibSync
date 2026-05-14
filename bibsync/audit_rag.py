@@ -12,9 +12,20 @@ Pipeline:
      ▼  EmbeddingStore.retrieve(query, ...)
   top-K most-similar chunks for a specific claim
 
-Embeddings via the same OpenAI/OpenRouter client we already use elsewhere — no
-extra SDK. Cosine similarity in pure Python (no numpy). Cache is per-paper and
-keyed by embedding model, so changing the model invalidates the cache.
+Two embedding backends, resolved local-first:
+
+  1. LOCAL — via ``fastembed`` (BAAI/bge-small-en-v1.5 by default). Free,
+     fully offline, ~80 MB model download cached after first use. Quality
+     is on par with OpenAI's text-embedding-3-small for retrieval tasks.
+     Requires ``pip install -e ".[audit-rag]"`` (which includes fastembed).
+
+  2. API — via the OpenAI-compatible ``embeddings`` endpoint. Used when
+     fastembed isn't installed AND the configured LLM provider exposes an
+     embeddings route (OpenAI native; OpenRouter for some models).
+
+Cache invalidates automatically on model change because the effective
+model name is stored alongside the vectors. Cosine similarity in pure
+Python — no numpy dep.
 """
 
 from __future__ import annotations
@@ -98,25 +109,182 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return num / (math.sqrt(na) * math.sqrt(nb))
 
 
-class EmbeddingStore:
-    """Compute + cache OpenAI/OpenRouter embeddings, retrieve top-K chunks.
+# Default models per backend. Both produce dense embeddings; cache is keyed by
+# the actual model name, so switching backends invalidates the cache cleanly.
+DEFAULT_LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_API_MODEL = "text-embedding-3-small"
 
-    Cache layout: ``<cache_dir>/embeddings/<paper_key>.json`` containing the
-    chunks and their embedding vectors plus the model name. Switching models
-    invalidates the cache automatically.
+
+# ── backends ────────────────────────────────────────────────────────────────
+
+
+class _LocalEmbeddingBackend:
+    """fastembed-backed embedder. ONNX-based, no PyTorch, no API key needed.
+
+    First use downloads the model (~80 MB for bge-small-en-v1.5) into the
+    fastembed cache; subsequent uses load from disk in <1s.
+    """
+
+    kind = "local"
+
+    def __init__(self, model_name: str):
+        from fastembed import TextEmbedding  # type: ignore
+
+        self.model_name = model_name
+        self._embedder = TextEmbedding(model_name=model_name)
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        import asyncio
+
+        def _run() -> list[list[float]]:
+            # fastembed.embed returns a generator of numpy arrays
+            return [list(map(float, v)) for v in self._embedder.embed(texts)]
+
+        return await asyncio.to_thread(_run)
+
+
+class _ApiEmbeddingBackend:
+    """OpenAI-compatible embeddings endpoint (OpenAI native, or any provider
+    that exposes the same shape, e.g. some OpenRouter routes)."""
+
+    kind = "api"
+
+    def __init__(self, model_name: str, client):
+        self.model_name = model_name
+        self._client = client
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        resp = await self._client.embeddings.create(model=self.model_name, input=texts)
+        return [d.embedding for d in resp.data]
+
+
+def _try_make_local_backend(model_hint: str) -> Optional[_LocalEmbeddingBackend]:
+    """Return a local backend if fastembed is installed and the model loads."""
+    try:
+        import fastembed  # noqa: F401
+    except ImportError:
+        dbg.trace(
+            "audit.rag",
+            "fastembed not installed — install with `pip install -e \".[audit-rag]\"` "
+            "to enable local Tier-2 embeddings",
+        )
+        return None
+    # If the user asked for an OpenAI-only model name (text-embedding-*), route
+    # to a sensible local default. Anything else, pass through as a local model id.
+    if not model_hint or model_hint == "auto" or model_hint.startswith("text-embedding-"):
+        local_model = DEFAULT_LOCAL_MODEL
+    else:
+        local_model = model_hint
+    try:
+        backend = _LocalEmbeddingBackend(local_model)
+        dbg.trace("audit.rag", "local backend ready", model=local_model)
+        return backend
+    except Exception as e:
+        dbg.trace("audit.rag", "local backend init failed", model=local_model, error=str(e))
+        return None
+
+
+def _try_make_api_backend(
+    model_hint: str, api_key: Optional[str]
+) -> Optional[_ApiEmbeddingBackend]:
+    """Return an API backend if the openai SDK + a usable LLM provider are configured."""
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        dbg.trace("audit.rag", "openai SDK not installed; cannot use API embeddings")
+        return None
+    cfg = config.resolve_llm_config(api_key)
+    if not cfg:
+        dbg.trace("audit.rag", "no LLM API key resolved for embeddings")
+        return None
+    model = (
+        DEFAULT_API_MODEL
+        if (not model_hint or model_hint == "auto")
+        else model_hint
+    )
+    client_kwargs: dict = {"api_key": cfg.api_key}
+    if cfg.base_url:
+        client_kwargs["base_url"] = cfg.base_url
+    try:
+        client = AsyncOpenAI(**client_kwargs)
+        dbg.trace("audit.rag", "api backend ready", model=model, base_url=cfg.base_url)
+        return _ApiEmbeddingBackend(model, client)
+    except Exception as e:
+        dbg.trace("audit.rag", "api backend init failed", error=str(e))
+        return None
+
+
+# ── store ──────────────────────────────────────────────────────────────────
+
+
+class EmbeddingStore:
+    """Compute + cache embeddings, retrieve top-K chunks.
+
+    Backend resolution (local-first by default):
+
+      ``backend='auto'`` (default) — try local (fastembed) first, then API.
+      ``backend='local'``         — force fastembed; fail if not installed.
+      ``backend='api'``           — force OpenAI-compatible endpoint;
+                                    fail if no key / SDK / provider support.
+
+    The chosen backend is resolved lazily on first use and cached. The cache
+    layout is ``<cache_dir>/embeddings/<paper_key>.json`` containing the
+    chunks, vectors, and ``effective_model`` (so different backends/models
+    don't collide).
     """
 
     def __init__(
         self,
         cache_dir: Path,
         *,
-        model: str = "text-embedding-3-small",
+        model: str = "auto",
         api_key: Optional[str] = None,
+        backend: str = "auto",
     ):
         self.dir = cache_dir / "embeddings"
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.model = model
+        self.requested_model = model
         self.api_key = api_key
+        self.requested_backend = backend
+        self._backend: Optional[object] = None
+        self._resolution_attempted = False
+
+    # ── backend resolution ─────────────────────────────────────────────────
+
+    def _resolve_backend(self):
+        if self._resolution_attempted:
+            return self._backend
+        self._resolution_attempted = True
+
+        if self.requested_backend == "local":
+            self._backend = _try_make_local_backend(self.requested_model)
+        elif self.requested_backend == "api":
+            self._backend = _try_make_api_backend(self.requested_model, self.api_key)
+        else:  # 'auto' — local-first
+            self._backend = _try_make_local_backend(self.requested_model)
+            if self._backend is None:
+                self._backend = _try_make_api_backend(
+                    self.requested_model, self.api_key
+                )
+
+        if self._backend is None:
+            dbg.trace(
+                "audit.rag",
+                "NO embedding backend available — Tier 2 will degrade to Tier 1 "
+                "for this run. Install fastembed (`pip install -e \".[audit-rag]\"`) "
+                "or configure an embeddings-capable LLM provider.",
+            )
+        return self._backend
+
+    @property
+    def effective_model(self) -> str:
+        b = self._resolve_backend()
+        return b.model_name if b else self.requested_model
+
+    @property
+    def effective_backend(self) -> str:
+        b = self._resolve_backend()
+        return b.kind if b else "none"
 
     # ── cache I/O ───────────────────────────────────────────────────────────
 
@@ -132,13 +300,17 @@ class EmbeddingStore:
             data = json.loads(p.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
-        if data.get("model") != self.model:
+        # Match BOTH model name and backend kind — same model id under different
+        # backends would produce different vectors.
+        if data.get("model") != self.effective_model or data.get("backend") != self.effective_backend:
             dbg.trace(
                 "audit.rag",
-                "cache invalidated (model mismatch)",
+                "cache invalidated (model/backend mismatch)",
                 key=paper_key,
                 cached_model=data.get("model"),
-                want_model=self.model,
+                cached_backend=data.get("backend"),
+                want_model=self.effective_model,
+                want_backend=self.effective_backend,
             )
             return None
         try:
@@ -155,7 +327,8 @@ class EmbeddingStore:
             self._path(paper_key).write_text(
                 json.dumps(
                     {
-                        "model": self.model,
+                        "model": self.effective_model,
+                        "backend": self.effective_backend,
                         "chunks": [asdict(c) for c in chunks],
                         "vectors": vectors,
                     }
@@ -168,34 +341,20 @@ class EmbeddingStore:
     # ── embedding ───────────────────────────────────────────────────────────
 
     async def _embed(self, texts: list[str]) -> Optional[list[list[float]]]:
-        """Call the embeddings endpoint via the configured LLM provider.
-
-        Works with both OpenAI and OpenRouter (both expose the same
-        embeddings API shape via the openai SDK).
-        """
         if not texts:
             return []
-        try:
-            from openai import AsyncOpenAI
-        except ImportError:
-            dbg.trace("audit.rag", "openai SDK not installed")
+        backend = self._resolve_backend()
+        if backend is None:
             return None
-
-        cfg = config.resolve_llm_config(self.api_key)
-        if not cfg:
-            dbg.trace("audit.rag", "no LLM API key resolved")
-            return None
-
-        client_kwargs: dict = {"api_key": cfg.api_key}
-        if cfg.base_url:
-            client_kwargs["base_url"] = cfg.base_url
-
         try:
-            client = AsyncOpenAI(**client_kwargs)
-            resp = await client.embeddings.create(model=self.model, input=texts)
-            return [d.embedding for d in resp.data]
+            return await backend.embed(texts)
         except Exception as e:
-            dbg.trace("audit.rag", "embeddings request failed", error=str(e))
+            dbg.trace(
+                "audit.rag",
+                "embed call failed",
+                backend=getattr(backend, "kind", "?"),
+                error=str(e),
+            )
             return None
 
     # ── public API ──────────────────────────────────────────────────────────
@@ -214,7 +373,12 @@ class EmbeddingStore:
                 return cached_vecs
 
         dbg.trace(
-            "audit.rag", "embedding chunks", key=paper_key, n=len(chunks), model=self.model
+            "audit.rag",
+            "embedding chunks",
+            key=paper_key,
+            n=len(chunks),
+            backend=self.effective_backend,
+            model=self.effective_model,
         )
         vectors = await self._embed([c.text for c in chunks])
         if vectors is None:
@@ -249,6 +413,7 @@ class EmbeddingStore:
             "retrieved",
             key=paper_key,
             top_k=top_k,
+            backend=self.effective_backend,
             scores=[round(s, 3) for _, s in result],
         )
         return result

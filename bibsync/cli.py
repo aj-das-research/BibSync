@@ -589,7 +589,8 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
     "contribution differs), "
     "2 = also download the open-access PDF, chunk + embed it, and retrieve the "
     "passages most relevant to each claim (catches specific numerical / "
-    "factual mismatches; requires pypdf and an embeddings-capable API key).",
+    "factual mismatches; requires `pip install -e \".[audit-rag]\"` which "
+    "includes pypdf + fastembed for fully-offline local embeddings).",
 )
 @click.option(
     "--rag-top-k",
@@ -599,10 +600,23 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
     help="Tier 2 only: number of top-similarity chunks to retrieve per claim.",
 )
 @click.option(
-    "--embedding-model",
-    default="text-embedding-3-small",
+    "--embedding-backend",
+    type=click.Choice(["auto", "local", "api"]),
+    default="auto",
     show_default=True,
-    help="Tier 2 only: model name for the embeddings call.",
+    help="Tier 2 only: where to compute embeddings. "
+    "'local' uses fastembed (BAAI/bge-small-en-v1.5 by default, fully offline, no API key); "
+    "'api' uses the OpenAI-compatible embeddings endpoint of your configured LLM provider; "
+    "'auto' tries local first, then API.",
+)
+@click.option(
+    "--embedding-model",
+    default="auto",
+    show_default=True,
+    help="Tier 2 only: model name for the embeddings call. "
+    "'auto' picks BAAI/bge-small-en-v1.5 for the local backend and "
+    "text-embedding-3-small for the API backend. "
+    "Override only if you need a specific model.",
 )
 @click.option(
     "--cache-dir",
@@ -655,6 +669,7 @@ def audit_cmd(
     openai_model: Optional[str],
     tier: int,
     rag_top_k: int,
+    embedding_backend: str,
     embedding_model: str,
     cache_dir: Optional[Path],
     no_cache: bool,
@@ -711,6 +726,7 @@ def audit_cmd(
         no_cache=no_cache,
         rag_top_k=rag_top_k,
         embedding_model=embedding_model,
+        embedding_backend=embedding_backend,
         per_dir_bib=per_dir_bib,
     )
 

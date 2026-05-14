@@ -197,9 +197,15 @@ gets a Tier-0 audit; a paper with no open-access PDF still gets a Tier-1 audit.
 # Tier 1 (default): abstract-grounded verdicts for everything findable
 bibsync audit . --bib references.bib
 
-# Tier 2: full RAG against the PDFs (needs pypdf and an embeddings-capable API key)
-pip install -e ".[openai,audit-rag]"
+# Tier 2: full RAG against the PDFs.
+# Default backend is local: open-source embeddings via fastembed
+# (BAAI/bge-small-en-v1.5, ONNX, ~80 MB cached after first run). No API key
+# needed for the embedding step — only your existing LLM key for completions.
+pip install -e ".[audit-rag]"
 bibsync audit . --bib references.bib --tier 2 --rag-top-k 5
+
+# Force the hosted (OpenAI-compatible) embeddings backend instead:
+bibsync audit . --bib references.bib --tier 2 --embedding-backend api
 
 # Auto-remove hallucinated cites (replaced with a marker comment preserving the LLM's reasoning)
 bibsync audit . --bib references.bib --fix

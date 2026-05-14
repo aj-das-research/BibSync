@@ -215,7 +215,8 @@ async def audit_project(
     cache_dir: Optional[Path] = None,
     no_cache: bool = False,
     rag_top_k: int = 5,
-    embedding_model: str = "text-embedding-3-small",
+    embedding_model: str = "auto",
+    embedding_backend: str = "auto",
     ss_api_key: Optional[str] = None,
     per_dir_bib: bool = False,
 ) -> AuditReport:
@@ -315,7 +316,12 @@ async def audit_project(
         from .audit_sources.pdf import PdfCache
         from .audit_rag import EmbeddingStore
         pdf_cache = PdfCache(cache_dir)
-        embed_store = EmbeddingStore(cache_dir, model=embedding_model, api_key=api_key)
+        embed_store = EmbeddingStore(
+            cache_dir,
+            model=embedding_model,
+            api_key=api_key,
+            backend=embedding_backend,
+        )
 
     # Cache enrichment + verdicts per cite-key so multiple usages of the same key
     # in different claims still only fetch the paper / embed it / get its abstract
