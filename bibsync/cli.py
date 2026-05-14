@@ -229,6 +229,57 @@ def add(
     show_default=True,
     help="Seconds to sleep between Scholar lookups.",
 )
+@click.option(
+    "--verify-tier",
+    type=click.IntRange(0, 2),
+    default=0,
+    show_default=True,
+    help="Grounding gate: after the canonical-detection LLM accepts a "
+    "candidate, additionally verify the SPECIFIC claim is supported by the "
+    "paper. 0 = today's behaviour (canonical-detection only); 1 = also fetch "
+    "the paper's abstract and require the LLM to confirm the claim against "
+    "it; 2 = also download the PDF, embed chunks, and require verbatim "
+    "grounding in the retrieved chunks. Tier 2 catches misattributions like "
+    "'GPT-3 → 86.5% on MedQA' where the canonical paper exists but doesn't "
+    "actually support the specific number.",
+)
+@click.option(
+    "--verify-rag-top-k",
+    type=int,
+    default=5,
+    show_default=True,
+    help="--verify-tier 2 only: number of top-similarity chunks retrieved per claim.",
+)
+@click.option(
+    "--verify-embedding-backend",
+    type=click.Choice(["auto", "local", "api"]),
+    default="auto",
+    show_default=True,
+    help="--verify-tier 2 only: where to compute chunk embeddings. "
+    "'auto' picks local fastembed if installed, otherwise the API.",
+)
+@click.option(
+    "--verify-grounding-floor",
+    type=float,
+    default=0.6,
+    show_default=True,
+    help="--verify-tier ≥1 only: minimum confidence the grounding LLM must "
+    "return for supports=true to ACCEPT the candidate. Lower = more permissive.",
+)
+@click.option(
+    "--cache-dir",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="--verify-tier ≥1 only: directory for paper-content / PDF / embedding "
+    "caches. Defaults to the platform user-cache dir.",
+)
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="--verify-tier ≥1 only: bypass on-disk caches; re-fetch abstracts "
+    "and re-embed chunks.",
+)
 def suggest_cmd(
     tex_file: Path,
     bib_path: Path,
@@ -236,6 +287,12 @@ def suggest_cmd(
     openai_model: Optional[str],
     auto: bool,
     delay: float,
+    verify_tier: int,
+    verify_rag_top_k: int,
+    verify_embedding_backend: str,
+    verify_grounding_floor: float,
+    cache_dir: Optional[Path],
+    no_cache: bool,
 ) -> None:
     """Read TEX_FILE, find paragraphs without citations, suggest + insert appropriate ones.
 
@@ -255,7 +312,14 @@ def suggest_cmd(
             "[bold]bibsync config set openai_key sk-...[/bold]"
         )
         sys.exit(2)
-    console.print(f"[dim]Using {llm_cfg.provider} ({llm_cfg.model})[/dim]")
+    tier_blurb = {
+        0: "Filter C only (canonical-paper detection)",
+        1: "+ Filter D Tier-1 grounding (abstract)",
+        2: "+ Filter D Tier-2 grounding (PDF chunks via RAG)",
+    }[verify_tier]
+    console.print(
+        f"[dim]Using {llm_cfg.provider} ({llm_cfg.model}) — verify {tier_blurb}[/dim]"
+    )
 
     # Closure state:
     #   suggestion_n           — running counter shown in the prompt header
@@ -293,6 +357,18 @@ def suggest_cmd(
         console.print(f"  [cyan]Reason:[/cyan] {result.reason}")
         if scholar_hit:
             console.print(f"  [green]Scholar match:[/green] {scholar_hit.short()}")
+        # Show grounding evidence (Filter D) when --verify-tier ≥ 1 was used.
+        # This lets the user sanity-check WHY the LLM thinks the paper supports
+        # the specific claim, not just that it's the right canonical paper.
+        gnd = getattr(result, "grounding", None)
+        if gnd is not None and gnd.achieved_tier >= 1:
+            tier_label = {1: "abstract", 2: f"RAG×top-{gnd.evidence_summary.split()[0] if gnd.evidence_summary else '?'}"}.get(
+                gnd.achieved_tier, "metadata"
+            )
+            console.print(
+                f"  [magenta]Grounded ({tier_label}):[/magenta] "
+                f"conf={gnd.confidence:.2f} — {gnd.reason}"
+            )
         console.print(f"  [yellow]Will insert:[/yellow] \\cite{{{result.cite_key}}}")
         choice = Prompt.ask(
             "  Accept? [y]es / [n]o / [a]ccept all remaining / [q]uit",
@@ -318,6 +394,12 @@ def suggest_cmd(
         auto_approve=auto,
         approve_fn=None if auto else approve,
         delay_seconds=delay,
+        verify_tier=verify_tier,
+        rag_top_k=verify_rag_top_k,
+        grounding_floor=verify_grounding_floor,
+        embedding_backend=verify_embedding_backend,
+        cache_dir=cache_dir,
+        no_cache=no_cache,
     )
 
     t = Table(title=f"Suggestion report — {tex_file}", show_lines=True)
@@ -331,6 +413,8 @@ def suggest_cmd(
         "skipped": "[yellow]skipped[/yellow]",
         "duplicate": "[dim]duplicate[/dim]",
         "no_scholar_hit": "[yellow]no hit[/yellow]",
+        "no_supporting_match": "[yellow]no canonical match[/yellow]",
+        "no_grounded_match": "[red]canonical OK but claim not grounded[/red]",
         "anchor_not_found": "[yellow]anchor missing[/yellow]",
         "error": "[red]error[/red]",
     }
@@ -350,6 +434,32 @@ def suggest_cmd(
     console.print(
         "[bold]Summary:[/bold] " + ", ".join(f"{k}={v}" for k, v in report.summary().items())
     )
+
+    # ── Filter-D grounding rejection callout ─────────────────────────────────
+    # When verify_tier ≥ 1 was used AND any claims were rejected by grounding,
+    # surface them loudly with their reasons. These are the most actionable
+    # rejections — they mean "the canonical paper exists but doesn't support
+    # YOUR claim", i.e. the user's prose may have a factual error.
+    if verify_tier >= 1:
+        grounded_rejects = [
+            r for r in report.results if r.status == "no_grounded_match"
+        ]
+        if grounded_rejects:
+            console.print()
+            console.print(
+                f"[bold red]⚠  {len(grounded_rejects)} citation(s) rejected by "
+                f"Filter D (grounding) — the canonical paper was found, but it "
+                f"doesn't actually support the claim:[/bold red]"
+            )
+            for r in grounded_rejects:
+                console.print(
+                    f"   • [yellow]Para {r.paragraph_index}[/yellow] anchor "
+                    f"{r.anchor!r}: [dim]{r.note}[/dim]"
+                )
+            console.print(
+                "[dim]These are usually the most important rejections — review "
+                "the prose; the specific claim may be factually wrong.[/dim]"
+            )
 
 
 # fix --------------------------------------------------------------------------

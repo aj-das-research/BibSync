@@ -23,6 +23,10 @@ from typing import Optional
 from . import bibtex, dbg, llm, picker, scholar, tex_rewrite
 from .models import PaperHit
 
+# Grounding-gate (Filter D) imports are LAZY — only loaded when --verify-tier ≥ 1,
+# so a default suggest run doesn't pay the cost of importing audit_rag / pypdf /
+# fastembed when the user hasn't asked for grounding.
+
 # Per-claim caps: includes both deterministic canonical queries (see
 # _canonical_paper_queries) and the LLM-proposed queries. 5 = 2 canonical + 3 LLM.
 MAX_QUERIES_PER_CLAIM = 5
@@ -102,9 +106,12 @@ class SuggestionResult:
     reason: str
     scholar_hit: Optional[PaperHit] = None
     cite_key: Optional[str] = None
-    status: str = "pending"  # "added" | "skipped" | "no_scholar_hit" | "anchor_not_found" | "duplicate" | "error"
+    status: str = "pending"  # "added" | "skipped" | "no_scholar_hit" | "anchor_not_found" | "duplicate" | "error" | "no_supporting_match" | "no_grounded_match"
     note: str = ""
     identification: Optional["llm.IdentifiedPaper"] = None
+    # Filter-D grounding evidence (None when --verify-tier 0). Used by the CLI
+    # approval prompt to show the user what evidence backs the accepted citation.
+    grounding: Optional["_GroundingVerdict"] = None
 
 
 @dataclass
@@ -153,6 +160,184 @@ def _queries_from_identification(ident: llm.IdentifiedPaper) -> list[str]:
     return out
 
 
+@dataclass
+class _GroundingVerdict:
+    """Result of the Tier-1/2 grounding gate (Filter D) on a single Scholar candidate.
+
+    ``passed=True`` means: the LLM, given abstract (tier 1) or retrieved chunks
+    (tier 2), confirmed the candidate paper actually supports the SPECIFIC claim
+    — not just the topic. ``passed=False`` is one of:
+      * the LLM said supports=false with conf ≥ floor (real grounding rejection)
+      * we couldn't fetch the source / PDF / chunks (infra failure)
+
+    ``evidence_summary`` is a short human-readable string used in the approval
+    prompt UI: e.g. ``"abstract grounded"``, ``"5 chunks retrieved (top score 0.71)"``.
+    """
+    passed: bool
+    achieved_tier: int  # 0 = no grounding done, 1 = abstract, 2 = chunks
+    confidence: float
+    reason: str
+    evidence_summary: str = ""
+
+
+async def _ground_candidate(
+    *,
+    candidate: PaperHit,
+    claim_text: str,
+    verify_tier: int,
+    rag_top_k: int,
+    grounding_floor: float,
+    paper_cache,
+    pdf_cache,
+    embed_store,
+    no_cache: bool,
+    model: Optional[str],
+    api_key: Optional[str],
+    ss_api_key: Optional[str] = None,
+) -> _GroundingVerdict:
+    """Filter D — grounded verification of a Scholar candidate against a prose claim.
+
+    Reuses the audit pipeline end-to-end:
+      tier 1: ``fetch_paper_content(title)`` → audit_citation(abstract=...)
+      tier 2: + PDF download + chunking + embed + retrieve → audit_citation(chunks=...)
+
+    Returns a ``_GroundingVerdict``. The candidate-evaluation loop in
+    :func:`_resolve_suggestion` treats ``passed=False`` exactly like a Filter C
+    rejection — try the next candidate.
+    """
+    if verify_tier < 1:
+        return _GroundingVerdict(
+            passed=True, achieved_tier=0, confidence=0.0,
+            reason="grounding disabled (--verify-tier 0)",
+        )
+
+    # Lazy imports — only when grounding is actually requested.
+    from .audit_sources import fetch_paper_content
+
+    first_author = ""
+    if candidate.authors:
+        a = candidate.authors[0]
+        if "," in a:
+            first_author = a.split(",", 1)[0].strip()
+        else:
+            parts = a.split()
+            first_author = parts[-1] if parts else ""
+
+    dbg.trace(
+        "suggest.ground",
+        "fetching source",
+        title=candidate.title,
+        first_author=first_author,
+        tier=verify_tier,
+    )
+
+    content = await fetch_paper_content(
+        title=candidate.title,
+        first_author=first_author or None,
+        year=candidate.year,
+        cache=paper_cache,
+        no_cache=no_cache,
+        ss_api_key=ss_api_key,
+    )
+
+    if content is None:
+        # arXiv/SS/Crossref all missed (or title-match guard rejected every hit).
+        # Don't pay for an LLM call we already know will degrade to Tier 0.
+        dbg.trace(
+            "suggest.ground",
+            "REJECT no source",
+            title=candidate.title,
+            reason="arXiv/SS/Crossref all missed or rejected by title-match guard",
+        )
+        return _GroundingVerdict(
+            passed=False, achieved_tier=0, confidence=1.0,
+            reason="could not fetch paper abstract/PDF — Scholar canonical match "
+                   "may be the wrong paper, or paper is not open-access",
+        )
+
+    retrieved_chunk_texts: Optional[list[str]] = None
+    evidence_summary = ""
+
+    if verify_tier >= 2 and pdf_cache is not None and embed_store is not None:
+        if not content.pdf_url:
+            dbg.trace(
+                "suggest.ground",
+                "no open-access PDF — degrading to abstract-only grounding",
+                title=candidate.title,
+            )
+        else:
+            from .audit_rag import chunk_text
+            from .audit_sources.pdf import get_paper_text
+
+            paper_key = content.stable_key()
+            text = await get_paper_text(paper_key, content.pdf_url, pdf_cache)
+            chunks = chunk_text(text, paper_key) if text else []
+            if chunks:
+                top = await embed_store.retrieve(
+                    query=claim_text,
+                    paper_key=paper_key,
+                    chunks=chunks,
+                    top_k=rag_top_k,
+                )
+                if top:
+                    retrieved_chunk_texts = [
+                        f"[p.{c.page or '?'}] {c.text}" for c, _ in top
+                    ]
+                    top_score = round(top[0][1], 3)
+                    evidence_summary = (
+                        f"{len(retrieved_chunk_texts)} chunks (top cosine {top_score})"
+                    )
+
+    achieved_tier = 2 if retrieved_chunk_texts else (1 if content.abstract else 0)
+    if achieved_tier == 0:
+        # Source returned but no abstract AND no chunks — nothing to ground against.
+        dbg.trace(
+            "suggest.ground",
+            "REJECT no evidence",
+            title=candidate.title,
+            has_abstract=False,
+            has_chunks=False,
+        )
+        return _GroundingVerdict(
+            passed=False, achieved_tier=0, confidence=0.8,
+            reason="paper found but no abstract or open-access PDF — cannot ground",
+        )
+
+    if not evidence_summary:
+        evidence_summary = "abstract grounded" if achieved_tier == 1 else "chunks grounded"
+
+    # Now run the strengthened audit prompt with whatever evidence we got.
+    audit = llm.audit_citation(
+        claim_text=claim_text,
+        cited_paper_title=content.title or candidate.title,
+        cited_paper_authors=", ".join(content.authors or candidate.authors or []),
+        cited_paper_year=content.year or candidate.year,
+        cited_paper_venue=content.venue or (candidate.venue or ""),
+        abstract=content.abstract,
+        retrieved_chunks=retrieved_chunk_texts,
+        model=model,
+        api_key=api_key,
+    )
+
+    passed = audit.supports and audit.confidence >= grounding_floor
+    dbg.trace(
+        "suggest.ground",
+        "ACCEPTED" if passed else "REJECTED",
+        tier=achieved_tier,
+        supports=audit.supports,
+        conf=round(audit.confidence, 2),
+        reason=audit.reasoning,
+        evidence=evidence_summary,
+    )
+    return _GroundingVerdict(
+        passed=passed,
+        achieved_tier=achieved_tier,
+        confidence=audit.confidence,
+        reason=audit.reasoning,
+        evidence_summary=evidence_summary,
+    )
+
+
 async def _resolve_suggestion(
     suggestion: llm.CitationSuggestion,
     paragraph: str,
@@ -163,6 +348,16 @@ async def _resolve_suggestion(
     api_key: Optional[str],
     used_cluster_ids: Optional[set] = None,
     document_context: str = "",
+    # Filter-D grounding gate (Tier-1/2 verification). Default 0 = today's
+    # behaviour (Filter C only).
+    verify_tier: int = 0,
+    rag_top_k: int = 5,
+    grounding_floor: float = 0.6,
+    paper_cache=None,
+    pdf_cache=None,
+    embed_store=None,
+    no_cache: bool = False,
+    ss_api_key: Optional[str] = None,
 ) -> tuple[SuggestionResult, Optional[dict]]:
     """Agentic pipeline for one suggested citation:
 
@@ -247,6 +442,12 @@ async def _resolve_suggestion(
     merged: dict[str, PaperHit] = {}
     evaluated: set[str] = set()  # cluster IDs we've already LLM-judged or filtered
     accepted: Optional[PaperHit] = None
+    # Track whether at least one candidate passed Filter C (topical canonicality)
+    # but failed Filter D (grounding). When this is True at end-of-loop, the
+    # rejection mode is "we found the right paper but it doesn't support YOUR
+    # specific claim" — a much more actionable user signal than "no canonical
+    # match found at all".
+    grounding_blocked: bool = False
     last_reason = ""
     last_confidence = 0.0
     used = used_cluster_ids if used_cluster_ids is not None else set()
@@ -314,7 +515,7 @@ async def _resolve_suggestion(
                 evaluated.add(candidate.cluster_id)
                 continue
 
-            # Filter C — LLM-as-judge.
+            # Filter C — LLM-as-judge (canonical-paper detection).
             verdict = llm.verify_claim_support(
                 claim_text=suggestion.anchor,
                 context=paragraph,
@@ -325,26 +526,75 @@ async def _resolve_suggestion(
             evaluated.add(candidate.cluster_id)
             last_reason = verdict.reasoning
             last_confidence = verdict.confidence
-            if verdict.supports and verdict.confidence >= CLAIM_SUPPORT_CONFIDENCE_FLOOR:
-                accepted = candidate
-                if candidate.cluster_id:
-                    used.add(candidate.cluster_id)
+            if not (
+                verdict.supports
+                and verdict.confidence >= CLAIM_SUPPORT_CONFIDENCE_FLOOR
+            ):
                 dbg.trace(
                     "suggest.verify",
-                    "ACCEPTED",
-                    after_query=q_idx + 1,
-                    candidate_idx=cand_i + 1,
+                    f"rejected (after q{q_idx + 1}, cand{cand_i + 1})",
                     conf=round(verdict.confidence, 2),
-                    title=candidate.title,
-                    cluster=candidate.cluster_id,
+                    reason=verdict.reasoning,
                 )
-                break
+                continue
+
+            # Filter D — grounding gate (Tier-1/2 verification against the actual
+            # paper's abstract / full-text chunks). Only runs when --verify-tier ≥ 1.
+            # A no-op when verify_tier=0, so Filter C remains the only gate by default.
+            grounding = await _ground_candidate(
+                candidate=candidate,
+                claim_text=suggestion.anchor,
+                verify_tier=verify_tier,
+                rag_top_k=rag_top_k,
+                grounding_floor=grounding_floor,
+                paper_cache=paper_cache,
+                pdf_cache=pdf_cache,
+                embed_store=embed_store,
+                no_cache=no_cache,
+                model=model,
+                api_key=api_key,
+                ss_api_key=ss_api_key,
+            )
+            if not grounding.passed:
+                # The candidate is the right canonical paper, but the SPECIFIC
+                # claim isn't supported by the paper's actual content. Reject and
+                # try the next candidate. Surface the grounding reason — it's
+                # usually more actionable than Filter-C reasons ("the paper does
+                # not mention 'MedQA' or '86.5%'").
+                grounding_blocked = True
+                last_reason = (
+                    f"grounded rejection (tier {grounding.achieved_tier}): "
+                    f"{grounding.reason}"
+                )
+                last_confidence = grounding.confidence
+                dbg.trace(
+                    "suggest.ground",
+                    f"rejected (after q{q_idx + 1}, cand{cand_i + 1})",
+                    achieved_tier=grounding.achieved_tier,
+                    conf=round(grounding.confidence, 2),
+                    reason=grounding.reason,
+                )
+                continue
+
+            # Both Filter C (canonicality) AND Filter D (grounding) accept.
+            accepted = candidate
+            if candidate.cluster_id:
+                used.add(candidate.cluster_id)
+            # Stash grounding evidence on the result so the approval prompt
+            # and end-of-run report can show it.
+            result.grounding = grounding
             dbg.trace(
                 "suggest.verify",
-                f"rejected (after q{q_idx + 1}, cand{cand_i + 1})",
+                "ACCEPTED",
+                after_query=q_idx + 1,
+                candidate_idx=cand_i + 1,
                 conf=round(verdict.confidence, 2),
-                reason=verdict.reasoning,
+                ground_tier=grounding.achieved_tier,
+                ground_conf=round(grounding.confidence, 2),
+                title=candidate.title,
+                cluster=candidate.cluster_id,
             )
+            break
 
         if accepted is not None:
             # Stop — no need to run the remaining queries.
@@ -368,11 +618,24 @@ async def _resolve_suggestion(
     if accepted is None:
         # Build a single-pass sorted view for the report's "top candidate" surface.
         sorted_pool = sorted(merged.values(), key=lambda h: (h.cited_by or 0), reverse=True)
-        result.status = "no_supporting_match"
-        result.note = (
-            f"LLM rejected all {min(len(sorted_pool), MAX_CANDIDATES_PER_CLAIM)} "
-            f"top candidate(s) — last reason: {last_reason}"
-        )
+        if grounding_blocked:
+            # The canonical-detection filter (C) accepted at least one candidate,
+            # but the grounding filter (D) rejected all of them. This means we
+            # FOUND the right paper, but the paper doesn't actually support the
+            # specific prose claim. Distinct from no_supporting_match because
+            # the user likely needs to fix their CLAIM, not search for a different
+            # paper.
+            result.status = "no_grounded_match"
+            result.note = (
+                f"canonical paper found, but grounding (Tier-1/2) rejected — "
+                f"{last_reason}"
+            )
+        else:
+            result.status = "no_supporting_match"
+            result.note = (
+                f"LLM rejected all {min(len(sorted_pool), MAX_CANDIDATES_PER_CLAIM)} "
+                f"top candidate(s) — last reason: {last_reason}"
+            )
         if sorted_pool:
             result.scholar_hit = sorted_pool[0]
         return result, None
@@ -414,6 +677,16 @@ async def suggest_for_file(
     auto_approve: bool = False,
     approve_fn=None,  # callable(SuggestionResult, candidate_bibtex_entry) -> bool
     delay_seconds: float = 1.5,
+    # Filter-D grounding gate. verify_tier=0 → today's behaviour (Filter C only).
+    # verify_tier=1 → add abstract grounding. verify_tier=2 → add PDF-RAG grounding.
+    verify_tier: int = 0,
+    rag_top_k: int = 5,
+    grounding_floor: float = 0.6,
+    embedding_backend: str = "auto",
+    embedding_model: str = "auto",
+    cache_dir: Optional[Path] = None,
+    no_cache: bool = False,
+    ss_api_key: Optional[str] = None,
 ) -> SuggestReport:
     """Scan ``tex_file`` paragraph-by-paragraph for missing citations.
 
@@ -439,7 +712,40 @@ async def suggest_for_file(
         bib=str(bib_file),
         paragraphs=len(paragraphs),
         doc_chars=len(document_context),
+        verify_tier=verify_tier,
     )
+
+    # ── Filter-D grounding-gate setup ────────────────────────────────────────
+    # All initialised once and shared across every anchor in this run so a paper
+    # that grounds 3 different claims is fetched/embedded once.
+    paper_cache = None
+    pdf_cache = None
+    embed_store = None
+    if verify_tier >= 1:
+        from platformdirs import user_cache_dir
+        from .audit_sources import PaperContentCache
+        if cache_dir is None:
+            cache_dir = Path(user_cache_dir("bibsync", "bibsync"))
+        cache_dir = Path(cache_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        paper_cache = PaperContentCache(cache_dir)
+        dbg.trace("suggest.ground", "Tier-1 cache initialised", dir=str(cache_dir))
+    if verify_tier >= 2:
+        from .audit_rag import EmbeddingStore
+        from .audit_sources.pdf import PdfCache
+        pdf_cache = PdfCache(cache_dir)
+        embed_store = EmbeddingStore(
+            cache_dir,
+            model=embedding_model,
+            api_key=api_key,
+            backend=embedding_backend,
+        )
+        dbg.trace(
+            "suggest.ground",
+            "Tier-2 RAG pipeline initialised",
+            top_k=rag_top_k,
+            backend=embedding_backend,
+        )
 
     # Track which Scholar cluster_ids we've already cited in THIS run. If two
     # different anchors both resolve to the same paper, the second is almost
@@ -492,6 +798,14 @@ async def suggest_for_file(
                     headless=headless, model=model, api_key=api_key,
                     used_cluster_ids=used_cluster_ids,
                     document_context=document_context,
+                    verify_tier=verify_tier,
+                    rag_top_k=rag_top_k,
+                    grounding_floor=grounding_floor,
+                    paper_cache=paper_cache,
+                    pdf_cache=pdf_cache,
+                    embed_store=embed_store,
+                    no_cache=no_cache,
+                    ss_api_key=ss_api_key,
                 )
 
                 if entry is None:

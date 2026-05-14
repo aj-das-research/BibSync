@@ -1,0 +1,29 @@
+\section{Background}
+
+% ─── CLAIM A — TOPICAL, SHOULD BE GROUNDED + ACCEPTED ─────────────────────────
+% This is a real, on-topic claim about the Transformer paper. The canonical
+% paper (Vaswani 2017) really does introduce multi-head self-attention as a
+% replacement for recurrence. Both Filter C (canonical detection) and Filter D
+% (grounding) should accept this citation when run with --verify-tier 1 or 2.
+The Transformer architecture introduced multi-head self-attention as a
+replacement for recurrence in sequence modeling.
+
+% ─── CLAIM B — QUANTITATIVE-TRAP, SHOULD BE GROUNDED + REJECTED ───────────────
+% Filter C should ACCEPT "Language Models are Few-Shot Learners" (Brown 2020)
+% as the canonical GPT-3 paper — it is. But the specific claim "86.5% on MedQA"
+% is FALSE; that number is from Med-PaLM 2 (Singhal 2025), not GPT-3.
+%
+% With --verify-tier 0 (today's default): the GPT-3 paper gets cited and the
+%   user ends up with a wrong-attribution citation in their bibliography.
+% With --verify-tier 1: Filter D fetches the GPT-3 abstract, which doesn't
+%   mention MedQA; the LLM should reject and the citation should NOT be inserted.
+% With --verify-tier 2: Filter D additionally retrieves chunks from the actual
+%   PDF; the chunks contain no "MedQA" / "86.5%" string; the LLM rejects with
+%   a verbatim "no chunk mentions MedQA" reason.
+%
+% Expected status in the report:
+%   --verify-tier 0  →  added (false-positive — the integration we just fixed!)
+%   --verify-tier 1  →  no_grounded_match
+%   --verify-tier 2  →  no_grounded_match (with stronger reasoning)
+GPT-3 achieves 86.5\% accuracy on the MedQA medical question-answering
+benchmark.
