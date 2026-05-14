@@ -611,14 +611,20 @@ ACCEPT (supports=true) when ANY of these hold (each is sufficient on its own):
 
   A. The CANDIDATE is the canonical work that INTRODUCED the named system / method
      / dataset the CLAIM attributes. The paper's title need NOT literally contain
-     the system name — many canonical papers describe the system as "a foundation
-     model for X" rather than naming it in the title. Example: the Prov-GigaPath
-     paper is titled "A whole-slide foundation model for digital pathology" — that
-     IS the right paper to cite for any claim about Prov-GigaPath.
+     the system name — canonical papers very commonly describe the system without
+     naming it. Recognise these patterns as canonical introductions:
+       - "A foundation model for <domain>" (e.g., introduces Prov-GigaPath, RETFound)
+       - "<Capability> in/for <domain>" with high cited_by (e.g. "Capabilities of
+         gemini models in medicine" IS the Med-Gemini paper)
+       - "<Verb> anything in <domain>" (e.g. "Segment anything in medical images"
+         IS the MedSAM paper)
+       - Generally: the FIRST/EARLIEST paper from the originating research group
+         that describes the system, regardless of title wording
 
-  B. The CANDIDATE has VERY HIGH citation count (cited_by ≥ 500) AND topic-matches
-     the claim. High citation count + topic match is overwhelming evidence of
-     canonicality; derivatives almost never reach 500+ citations.
+  B. The CANDIDATE has NOTABLE citation count (cited_by ≥ 200) AND topic-matches
+     the claim. Citations + topic match is strong evidence of canonicality;
+     derivatives, follow-ups and surveys can also reach a few hundred cites, so this
+     rule complements (does not replace) rule A and the rejection rules below.
 
   C. The CANDIDATE clearly introduces a named result that the claim attributes,
      and the author / year / venue are plausible.
@@ -647,14 +653,35 @@ REJECT (supports=false) when ANY of these hold:
      all, you CANNOT reject on rule X — pivot to A (introduces the system) or
      B (high cited_by + topic match).
 
-  Y. The CANDIDATE is a SURVEY, REVIEW, retrospective, comprehensive overview, or
-     book chapter, AND there is no indication this is the ORIGINAL work.
-     Title signals: "A survey of", "A review of", "Comprehensive analysis of",
-     "Applications of X in Y", "An overview of".
+  Y. The CANDIDATE is a SURVEY, REVIEW, retrospective, comprehensive overview,
+     ANALYSIS / PROBING study, BENCHMARK, EVALUATION, COMMENTARY, position paper,
+     or book chapter — and there is no indication it is itself the ORIGINAL work.
+
+     STRONG title signals (REJECT immediately if any match):
+       - "A survey of X" / "A review of X" / "An overview of X"
+       - "Comprehensive analysis of X" / "Comprehensive evaluation of X"
+       - "Applications of X in <Y>" / "X in <domain>: a review"
+       - "What does X learn" / "Understanding X" / "Analyzing X" / "Probing X"
+         (these are analysis papers ABOUT X, never the original X paper)
+       - "How does X work" / "Where it comes and where it goes" (descriptive
+         survey phrasing)
+       - "Revisiting X" / "Rethinking X" / "Beyond X" (commentary / reformulation)
+       - "X: where it comes and where it goes" — verbose descriptive subtitle
+       - "Towards X" without strong evidence of being the originating paper
+       - Titles with ":" subtitle that is a definition/description rather than
+         the system name itself
+
+     EXAMPLE (must REJECT):
+       - claim "BERT" + candidate "What does BERT learn about the structure of
+         language?" → REJECT (probing study, not the BERT introduction)
+       - claim "attention mechanism" + candidate "Attention mechanism in neural
+         networks: where it comes and where it goes" → REJECT (survey)
+       - claim "RETFound" + candidate "Independent evaluation of RETFound on
+         optic nerve" → REJECT (evaluation, not original RETFound paper)
 
   Z. The CANDIDATE evaluates / replicates / extends another work and is NOT itself
      the foundational introduction. Title signals: "Independent evaluation of X",
-     "Replicability of X", "Assessing X", "Extending X to Y".
+     "Replicability of X", "Assessing X", "Extending X to Y", "Improving X via Y".
 
   W. The CANDIDATE is on a clearly different topic (only superficial keyword overlap).
 
