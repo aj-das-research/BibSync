@@ -39,6 +39,69 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# Stealth init script — runs on every page BEFORE any site JS, patching the
+# automation fingerprints Google Scholar uses to decide whether to CAPTCHA-wall us.
+# Compiled from the stealth techniques in playwright-stealth and puppeteer-extra-stealth.
+# This is what reliably drops Scholar's CAPTCHA frequency from "every few queries"
+# to "very rarely".
+_STEALTH_INIT_SCRIPT = r"""
+// 1. Hide navigator.webdriver (the single most reliable bot signal).
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// 2. Spoof navigator.plugins to look like a real Chrome install.
+Object.defineProperty(navigator, 'plugins', {
+  get: () => [
+    { name: 'PDF Viewer', filename: 'internal-pdf-viewer' },
+    { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer' },
+    { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer' },
+    { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer' },
+    { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer' },
+  ],
+});
+
+// 3. navigator.languages — real browsers always return >= 2 entries.
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+// 4. Spoof the chrome runtime global that real Chrome exposes (Playwright omits it).
+if (!window.chrome) { window.chrome = {}; }
+window.chrome.runtime = window.chrome.runtime || {};
+
+// 5. Permissions API: real Chrome returns the actual permission state for
+//    notifications; Playwright's default returns 'denied' unconditionally, which
+//    is a tell.
+const _origPermQuery = (window.navigator.permissions && window.navigator.permissions.query)
+  ? window.navigator.permissions.query.bind(window.navigator.permissions)
+  : null;
+if (_origPermQuery) {
+  window.navigator.permissions.query = (params) =>
+    params && params.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : _origPermQuery(params);
+}
+
+// 6. WebGL vendor / renderer — automation frameworks expose a tell-tale "SwiftShader"
+//    or generic Mesa string. Spoof to a normal Intel/Apple GPU profile.
+try {
+  const _origGetParam = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function (parameter) {
+    if (parameter === 37445) return 'Intel Inc.';
+    if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+    return _origGetParam.call(this, parameter);
+  };
+} catch (e) { /* ignore */ }
+
+// 7. Hide the headless-chromium feature flags lingering in navigator.userAgentData.
+if (navigator.userAgentData) {
+  Object.defineProperty(navigator.userAgentData, 'brands', {
+    get: () => [
+      { brand: 'Google Chrome', version: '124' },
+      { brand: 'Chromium', version: '124' },
+      { brand: 'Not-A.Brand', version: '99' },
+    ],
+  });
+}
+"""
+
 
 def _profile_dir() -> Path:
     p = Path(user_data_dir("bibsync", "bibsync")) / "chrome-profile"
@@ -66,11 +129,23 @@ async def _browser(headless: bool = False) -> AsyncIterator:
             user_data_dir=str(_profile_dir()),
             headless=headless,
             user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 900},
+            viewport={"width": 1366, "height": 800},  # common laptop resolution
+            locale="en-US",
+            timezone_id="America/Los_Angeles",
             args=[
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--disable-site-isolation-trials",
             ],
         )
+        # Apply the stealth init script to every page opened in this context.
+        # Runs BEFORE any page JS, so Scholar's fingerprint checks see the
+        # patched globals from the very first request.
+        try:
+            await ctx.add_init_script(_STEALTH_INIT_SCRIPT)
+            dbg.trace("scholar.browser", "stealth init script applied")
+        except Exception as e:
+            dbg.trace("scholar.browser", "WARN stealth init failed", error=str(e))
         try:
             yield ctx
         finally:
