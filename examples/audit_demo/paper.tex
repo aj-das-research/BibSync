@@ -1,0 +1,30 @@
+\section{Introduction}
+
+% ─── CORRECTLY-CITED CLAIMS (audit should say "verified") ───
+The Transformer architecture introduced self-attention as a replacement for
+recurrence in sequence modeling~\cite{vaswani2017attention}.
+BERT~\cite{devlin2019bert} established the pretraining-then-finetuning paradigm
+for language understanding.
+Residual networks~\cite{he2016resnet} showed that very deep convolutional networks
+can be trained reliably using identity shortcuts for image classification.
+Generative adversarial networks~\cite{goodfellow2014gan} introduced an adversarial
+training objective between generator and discriminator.
+
+% ─── HALLUCINATED / MISATTRIBUTED CITATIONS (audit should say "hallucinated") ───
+State-of-the-art speech recognition on LibriSpeech achieves under 2\% word error
+rate~\cite{vaswani2017attention}.
+% ↑ Vaswani 2017 is the Transformer paper. It is NOT about speech recognition or LibriSpeech.
+
+For protein structure prediction at near-experimental accuracy, see the AlphaFold
+approach~\cite{he2016resnet}.
+% ↑ He 2016 is ResNet (computer vision). It has nothing to do with protein structure.
+
+\section{Related work}
+
+% ─── BROKEN REFERENCE (audit should say "missing_in_bib") ───
+Recent work on agentic LLMs~\cite{nonexistent2024agents} demonstrates strategic
+multi-turn reasoning.
+% ↑ The key 'nonexistent2024agents' is not in references.bib at all.
+
+% ─── COMMENTED-OUT CITE (audit should NOT process this) ───
+% A commented citation: \cite{devlin2019bert} should be ignored entirely.

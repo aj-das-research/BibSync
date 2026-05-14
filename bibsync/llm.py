@@ -956,6 +956,144 @@ def verify_claim_support(
 
 
 @dataclass
+class CitationAudit:
+    """Verdict from the audit agent that decides whether an EXISTING citation in
+    LaTeX prose actually supports the claim it's attached to. Used by ``bibsync audit``.
+
+    This is distinct from :class:`ClaimSupport`: that one asks "is this the canonical
+    paper to cite?"; this one asks the broader "is this paper a reasonable citation
+    for this claim, or is it a topic mismatch / hallucination?". A non-canonical
+    paper can still be a fine citation.
+    """
+
+    supports: bool
+    confidence: float  # 0.0 - 1.0
+    reasoning: str
+
+
+_AUDIT_CITATION_SYSTEM = """\
+You are auditing an EXISTING citation in academic prose. The user has a CLAIM and a
+specific CITED PAPER. Decide whether the cited paper SUPPORTS the claim — i.e.,
+whether it's a reasonable scholarly source for what the claim attributes.
+
+This is DIFFERENT from picking the most canonical paper. A non-canonical paper can
+still be a fine citation if its topic / contribution aligns with the claim. You are
+auditing for misattribution and hallucination, not for citation perfection.
+
+SUPPORTS (supports=true) if ANY of these hold:
+  - The paper's TOPIC matches what the claim is about (e.g., the claim is about
+    transformer attention and the paper is "Attention Is All You Need").
+  - The paper's CONTRIBUTION is what the claim attributes to it.
+  - A reviewer would not flag this citation as a misattribution.
+  - The paper is a reasonable scholarly source for this claim, even if not the
+    most canonical one.
+
+DOES NOT SUPPORT (supports=false) — flag as hallucination/misattribution if:
+  - The paper is on a CLEARLY DIFFERENT TOPIC than the claim. Examples:
+      * claim about NLP / language model + paper about computer vision/image
+      * claim about computational pathology + paper about retinal images
+      * claim about speech recognition + paper about transformer translation
+  - The paper is in a different field that doesn't address the claim's subject.
+  - The paper's contribution is unrelated to or contradicts the claim.
+  - The citation looks fabricated (paper title and claim subject have no overlap).
+
+BE CONSERVATIVE: when in doubt, return supports=true with lower confidence. A
+wrong "this is hallucinated" verdict makes the user delete a good citation. A
+missed hallucination is recoverable later.
+
+But when topic mismatch is OBVIOUS (e.g., a CV paper for an NLP claim), flag it
+confidently. False supports>0.85 should only be returned when you're certain.
+
+Return a single JSON object:
+  {
+    "supports": true | false,
+    "confidence": 0.0 to 1.0,
+    "reasoning": "one short sentence — what tells you it does or doesn't support"
+  }
+"""
+
+
+def audit_citation(
+    claim_text: str,
+    cited_paper_title: str,
+    cited_paper_authors: str = "",
+    cited_paper_year: Optional[int] = None,
+    cited_paper_venue: str = "",
+    *,
+    model: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> CitationAudit:
+    """Audit whether the cited paper supports the surrounding prose claim.
+
+    Used by ``bibsync audit`` to detect hallucinated / misattributed citations.
+    Conservative on failure — any error returns ``supports=True`` with confidence 0
+    so the caller falls back to "unverifiable" rather than deleting a real citation.
+    """
+    try:
+        client, model_id = _get_client_and_model(api_key, model)
+    except Exception as e:
+        dbg.trace("llm.audit", "ERR client unavailable", error=str(e))
+        return CitationAudit(True, 0.0, f"LLM client unavailable: {e}")
+
+    dbg.trace(
+        "llm.audit",
+        "calling",
+        model=model_id,
+        claim=claim_text,
+        paper_title=cited_paper_title,
+        paper_authors=cited_paper_authors,
+        paper_year=cited_paper_year,
+    )
+
+    user_msg = (
+        "Does the cited paper SUPPORT the claim? Return JSON.\n\n"
+        f"CLAIM (academic prose containing the citation):\n  {claim_text!r}\n\n"
+        "CITED PAPER (from the user's .bib entry):\n"
+        f"  title:   {cited_paper_title!r}\n"
+        f"  authors: {cited_paper_authors!r}\n"
+        f"  year:    {cited_paper_year}\n"
+        f"  venue:   {cited_paper_venue!r}\n"
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": _AUDIT_CITATION_SYSTEM},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        return CitationAudit(True, 0.0, f"LLM call failed: {e}")
+
+    content = _safe_extract_content(resp)
+    if not content:
+        return CitationAudit(True, 0.0, "no LLM response content")
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return CitationAudit(True, 0.0, "LLM did not return valid JSON")
+    if not isinstance(data, dict):
+        return CitationAudit(True, 0.0, "LLM response was not a JSON object")
+
+    verdict = CitationAudit(
+        supports=bool(data.get("supports", True)),
+        confidence=float(data.get("confidence") or 0.0),
+        reasoning=str(data.get("reasoning") or ""),
+    )
+    dbg.trace(
+        "llm.audit",
+        "verdict",
+        supports=verdict.supports,
+        conf=round(verdict.confidence, 2),
+        reason=verdict.reasoning,
+    )
+    return verdict
+
+
+@dataclass
 class VerifiedPick:
     """Outcome of :func:`pick_verified_match` — either a Scholar hit the LLM endorsed
     as the same paper, or ``None`` with a human-readable rejection reason."""

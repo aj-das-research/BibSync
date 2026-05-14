@@ -14,6 +14,7 @@ from rich.table import Table
 
 from . import (
     __version__,
+    audit as audit_mod,
     bibtex,
     config as cfg,
     dbg,
@@ -563,6 +564,148 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
         f"[red]{counts.get('not_found', 0)} not found[/red], "
         f"[red]{counts.get('no_title', 0)} missing title[/red]"
     )
+
+
+# audit ------------------------------------------------------------------------
+
+
+@main.command(name="audit")
+@click.argument(
+    "project_root",
+    type=click.Path(file_okay=False, exists=True, path_type=Path),
+    default=Path("."),
+)
+@_bib_option
+@_model_option
+@click.option(
+    "--fix",
+    "do_fix",
+    is_flag=True,
+    default=False,
+    help="Replace hallucinated \\cite{key} occurrences with a marker comment "
+    "(keeps the rest of the \\cite{...} list intact when only some keys are bad).",
+)
+@click.option(
+    "--confidence-floor",
+    type=float,
+    default=0.7,
+    show_default=True,
+    help="Only mark a citation as hallucinated when the LLM's supports=false "
+    "verdict is at least this confident. Weaker no-support verdicts fall into "
+    "'unverifiable' instead.",
+)
+@click.option(
+    "--delay",
+    type=float,
+    default=0.5,
+    show_default=True,
+    help="Seconds to sleep between LLM calls (be polite to your API quota).",
+)
+def audit_cmd(
+    project_root: Path,
+    bib_path: Path,
+    openai_model: Optional[str],
+    do_fix: bool,
+    confidence_floor: float,
+    delay: float,
+) -> None:
+    """Audit every \\cite{} in PROJECT_ROOT — verify each cited paper actually
+    supports the claim it's attached to.
+
+    For each \\cite{key}: looks up the .bib entry, then asks the LLM whether the
+    paper's topic/contribution supports the surrounding prose claim. Reports:
+      * verified       — the cited paper supports the claim
+      * hallucinated   — clear topic mismatch (likely LLM-fabricated citation)
+      * unverifiable   — LLM couldn't decide confidently; keep as-is
+      * missing_in_bib — cited key has no entry in the .bib (broken reference)
+
+    Pass --fix to replace every confidently-hallucinated \\cite{} with a marker
+    comment that records the original key and the LLM's reasoning, so you can
+    see (and manually restore if needed) what was removed.
+    """
+    if not bib_path.exists():
+        console.print(f"[red]{bib_path} not found.[/red]")
+        sys.exit(1)
+
+    llm_cfg = cfg.resolve_llm_config()
+    if not llm_cfg:
+        console.print(
+            "[red]No LLM API key found.[/red] `audit` needs an LLM for claim verification. "
+            "Set one with:\n  [bold]bibsync config set openrouter_key sk-or-...[/bold]"
+        )
+        sys.exit(2)
+    console.print(f"[dim]Using {llm_cfg.provider} ({llm_cfg.model}) for citation audit[/dim]")
+
+    report = audit_mod.audit_project_sync(
+        project_root,
+        bib_path,
+        model=openai_model,
+        api_key=llm_cfg.api_key,
+        delay_seconds=delay,
+        fix=do_fix,
+        confidence_floor=confidence_floor,
+    )
+
+    if not report.checks:
+        console.print(f"[dim]No \\cite{{}} calls found in {project_root}.[/dim]")
+        return
+
+    t = Table(
+        title=f"Citation audit — {project_root}  (bib: {bib_path.name})",
+        show_lines=True,
+    )
+    t.add_column("Cite key", style="bold")
+    t.add_column("Status")
+    t.add_column("Location")
+    t.add_column("Conf.", justify="right")
+    t.add_column("Claim → paper", overflow="fold")
+    t.add_column("LLM reasoning", overflow="fold")
+    status_styles = {
+        "verified": "[green]verified[/green]",
+        "hallucinated": "[red]hallucinated[/red]",
+        "unverifiable": "[yellow]unverifiable[/yellow]",
+        "missing_in_bib": "[red]missing_in_bib[/red]",
+    }
+    for c in report.checks:
+        loc = f"{c.file.name}:{c.line}"
+        if c.bib_entry:
+            paper_summary = (c.bib_entry.get("title") or "").strip()
+            paper_authors = (c.bib_entry.get("author") or "").split(" and ")[0].strip()
+            if paper_authors:
+                paper_summary += f" — {paper_authors}"
+        else:
+            paper_summary = "(not in .bib)"
+        claim_preview = c.claim_text[:120] + ("…" if len(c.claim_text) > 120 else "")
+        claim_vs_paper = f"[dim]claim:[/dim] {claim_preview}\n[dim]paper:[/dim] {paper_summary}"
+        reasoning_cell = c.reasoning + ("\n[green](fixed)[/green]" if c.fixed else "")
+        t.add_row(
+            c.cite_key,
+            status_styles.get(c.status, c.status),
+            loc,
+            f"{c.confidence:.2f}" if c.confidence else "—",
+            claim_vs_paper,
+            reasoning_cell,
+        )
+    console.print(t)
+
+    summary = report.summary()
+    parts = []
+    for status in ("verified", "hallucinated", "unverifiable", "missing_in_bib"):
+        if status in summary:
+            color = "green" if status == "verified" else (
+                "red" if status in ("hallucinated", "missing_in_bib") else "yellow"
+            )
+            parts.append(f"[{color}]{summary[status]} {status}[/{color}]")
+    console.print(f"[bold]Summary:[/bold] " + ", ".join(parts))
+
+    fixed_count = sum(1 for c in report.checks if c.fixed)
+    if fixed_count:
+        console.print(
+            f"[green]Applied {fixed_count} fix(es)[/green] — review the .tex diff "
+            f"before committing."
+        )
+    elif do_fix and summary.get("hallucinated", 0) == 0:
+        console.print("[dim]--fix was set but no hallucinated citations were found.[/dim]")
 
 
 # scan -------------------------------------------------------------------------

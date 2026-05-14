@@ -1,0 +1,38 @@
+% Test bibliography for `bibsync audit`.
+%
+% Expected audit results:
+%   vaswani2017attention used for "Transformer self-attention"     → verified
+%   vaswani2017attention used for "LibriSpeech speech recognition" → hallucinated (topic mismatch)
+%   devlin2019bert       used for "pretraining-then-finetuning"    → verified
+%   he2016resnet         used for "deep CNN image classification"  → verified
+%   he2016resnet         used for "AlphaFold protein structure"    → hallucinated (topic mismatch)
+%   goodfellow2014gan    used for "GAN adversarial training"       → verified
+%   nonexistent2024agents (cited but NOT in this .bib)             → missing_in_bib
+
+@inproceedings{vaswani2017attention,
+  title     = {Attention is all you need},
+  author    = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N and Kaiser, {\L}ukasz and Polosukhin, Illia},
+  year      = {2017},
+  booktitle = {Advances in Neural Information Processing Systems},
+}
+
+@inproceedings{devlin2019bert,
+  title     = {BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding},
+  author    = {Devlin, Jacob and Chang, Ming-Wei and Lee, Kenton and Toutanova, Kristina},
+  year      = {2019},
+  booktitle = {Proceedings of NAACL-HLT},
+}
+
+@inproceedings{he2016resnet,
+  title     = {Deep residual learning for image recognition},
+  author    = {He, Kaiming and Zhang, Xiangyu and Ren, Shaoqing and Sun, Jian},
+  year      = {2016},
+  booktitle = {Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition},
+}
+
+@inproceedings{goodfellow2014gan,
+  title     = {Generative adversarial nets},
+  author    = {Goodfellow, Ian and Pouget-Abadie, Jean and Mirza, Mehdi and Xu, Bing and Warde-Farley, David and Ozair, Sherjil and Courville, Aaron and Bengio, Yoshua},
+  year      = {2014},
+  booktitle = {Advances in Neural Information Processing Systems},
+}
