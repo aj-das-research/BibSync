@@ -16,12 +16,14 @@ Public API:
 
 Fallback chain (first non-None wins; results are merged across sources):
 
-    cache  →  arXiv  →  Semantic Scholar  →  Crossref
+    cache  →  arXiv  →  Semantic Scholar  →  OpenAlex  →  Crossref
 
 arXiv is tried first because it has the broadest coverage of ML / CS preprints
 and the cleanest API. Semantic Scholar fills in missing abstracts (arXiv often
-has them, but not always) and provides ``openAccessPdf.url``. Crossref is the
-backstop for traditional-journal papers that aren't on either.
+has them, but not always) and provides ``openAccessPdf.url``. OpenAlex is the
+third hop — it's free, fast, has 200M+ works, supplies cleaner metadata than
+Crossref, and adds open-access PDF URLs for many non-arXiv papers. Crossref
+remains the last-ditch backstop for traditional-journal papers.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from .. import dbg
 from .arxiv import search_arxiv
 from .cache import PaperContentCache
 from .crossref import search_crossref
+from .openalex import search_openalex
 from .semantic_scholar import search_semantic_scholar
 from .types import PaperContent
 
@@ -101,8 +104,18 @@ async def fetch_paper_content(
         if ss:
             result = _merge(result, ss) if result else ss
 
-    # 4. Crossref — last-ditch for traditional journals (e.g. Nature/BMJ entries
-    #    where the .bib has a DOI but no arXiv preprint).
+    # 4. OpenAlex — covers non-arXiv papers (Nature, IEEE, ACL Anthology, etc.)
+    #    Free, no auth, 200M+ works. Adds open-access PDF URLs and citation-
+    #    graph metadata that Crossref doesn't have. Run before Crossref because
+    #    its title search is much stricter than Crossref's bibliographic search.
+    needs_more = (not result) or (not result.abstract) or (not result.pdf_url)
+    if needs_more:
+        oa = await search_openalex(title, first_author=first_author, year=year)
+        if oa:
+            result = _merge(result, oa) if result else oa
+
+    # 5. Crossref — last-ditch for traditional journals when a DOI is known
+    #    (DOI-keyed lookups are exact; title-search lookups are noisy).
     needs_more = (not result) or (not result.abstract)
     if needs_more:
         cr = await search_crossref(title, doi=doi)
