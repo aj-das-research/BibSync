@@ -281,6 +281,13 @@ def add(
     help="--verify-tier ≥1 only: bypass on-disk caches; re-fetch abstracts "
     "and re-embed chunks.",
 )
+@click.option(
+    "--output-json", "output_json",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write a machine-readable JSON report (every suggestion, every "
+    "grounding decision) to this path. Useful for CI / editor integrations.",
+)
 def suggest_cmd(
     tex_file: Path,
     bib_path: Path,
@@ -294,6 +301,7 @@ def suggest_cmd(
     verify_grounding_floor: float,
     cache_dir: Optional[Path],
     no_cache: bool,
+    output_json: Optional[Path],
 ) -> None:
     """Read TEX_FILE, find paragraphs without citations, suggest + insert appropriate ones.
 
@@ -461,6 +469,12 @@ def suggest_cmd(
                 "[dim]These are usually the most important rejections — review "
                 "the prose; the specific claim may be factually wrong.[/dim]"
             )
+
+    if output_json is not None:
+        output_json.write_text(
+            json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+        )
+        console.print(f"[dim]JSON report written to {output_json}[/dim]")
 
 
 # fix --------------------------------------------------------------------------
@@ -774,6 +788,14 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
     show_default=True,
     help="Seconds to sleep between LLM calls (be polite to your API quota).",
 )
+@click.option(
+    "--output-json", "output_json",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Write a machine-readable JSON report (every citation, every verdict, "
+    "every reasoning string) to this path. Lets external tools (CI, editors, "
+    "dashboards) consume the audit without screen-scraping.",
+)
 def audit_cmd(
     project_root: Path,
     bib_path: Path,
@@ -788,6 +810,7 @@ def audit_cmd(
     per_dir_bib: bool,
     confidence_floor: float,
     delay: float,
+    output_json: Optional[Path],
 ) -> None:
     """Audit every \\cite{} in PROJECT_ROOT — verify each cited paper actually
     supports the claim it's attached to.
@@ -796,6 +819,7 @@ def audit_cmd(
     paper's topic/contribution supports the surrounding prose claim. Reports:
       * verified       — the cited paper supports the claim
       * hallucinated   — clear topic mismatch (likely LLM-fabricated citation)
+      * contradicted   — paper exists but reports a different value than claimed
       * unverifiable   — LLM couldn't decide confidently; keep as-is
       * missing_in_bib — cited key has no entry in the .bib (broken reference)
 
@@ -989,6 +1013,12 @@ def audit_cmd(
         )
     elif do_fix and summary.get("hallucinated", 0) == 0:
         console.print("[dim]--fix was set but no hallucinated citations were found.[/dim]")
+
+    if output_json is not None:
+        output_json.write_text(
+            json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+        )
+        console.print(f"[dim]JSON report written to {output_json}[/dim]")
 
 
 # scan -------------------------------------------------------------------------

@@ -90,6 +90,50 @@ class AuditReport:
             out[c.status] = out.get(c.status, 0) + 1
         return out
 
+    def to_dict(self) -> dict:
+        """Serialisable view of the report for ``--output-json``.
+
+        Drops in-memory-only fields (parsed bib entries, paper_content
+        objects) and keeps what an external tool actually needs: file
+        locations, statuses, reasoning, confidence, evidence tier, and
+        the original prose claim.
+        """
+        return {
+            "project_root": str(self.project_root),
+            "bib_file": str(self.bib_file),
+            "tex_files_scanned": self.tex_files_scanned,
+            "summary": self.summary(),
+            "bib_files_used": {
+                str(t): str(b) for t, b in (self.bib_files_used or {}).items()
+            },
+            "checks": [
+                {
+                    "cite_key": c.cite_key,
+                    "file": str(c.file),
+                    "line": c.line,
+                    "char_offset": c.char_offset,
+                    "claim_text": c.claim_text,
+                    "status": c.status,
+                    "confidence": round(c.confidence, 3),
+                    "reasoning": c.reasoning,
+                    "evidence_tier": c.evidence_tier,
+                    "n_chunks": c.n_chunks,
+                    "degraded_reason": c.degraded_reason,
+                    "fixed": c.fixed,
+                    "paper_source": (
+                        c.paper_content.source if c.paper_content else None
+                    ),
+                    "paper_doi": (
+                        c.paper_content.doi if c.paper_content else None
+                    ),
+                    "paper_arxiv_id": (
+                        c.paper_content.arxiv_id if c.paper_content else None
+                    ),
+                }
+                for c in self.checks
+            ],
+        }
+
 
 # --- helpers ---------------------------------------------------------------
 

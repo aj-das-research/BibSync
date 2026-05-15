@@ -128,6 +128,52 @@ class SuggestReport:
             out[r.status] = out.get(r.status, 0) + 1
         return out
 
+    def to_dict(self) -> dict:
+        """Serialisable view for ``--output-json``. Drops in-memory-only
+        objects (scholar_hit, parsed identification) and keeps the
+        strings + metadata an external tool needs to render or take
+        action on each suggestion."""
+        def _grnd(g):
+            if g is None:
+                return None
+            return {
+                "passed": g.passed,
+                "achieved_tier": g.achieved_tier,
+                "confidence": round(g.confidence, 3),
+                "reason": g.reason,
+                "evidence_summary": g.evidence_summary,
+            }
+        return {
+            "tex_file": str(self.tex_file),
+            "bib_file": str(self.bib_file),
+            "paragraphs_scanned": self.paragraphs_scanned,
+            "paragraphs_with_existing_cites": self.paragraphs_with_existing_cites,
+            "summary": self.summary(),
+            "results": [
+                {
+                    "paragraph_index": r.paragraph_index,
+                    "paragraph_preview": r.paragraph_preview,
+                    "query": r.query,
+                    "anchor": r.anchor,
+                    "reason": r.reason,
+                    "status": r.status,
+                    "cite_key": r.cite_key,
+                    "note": r.note,
+                    "scholar_match": (
+                        {
+                            "title": r.scholar_hit.title,
+                            "year": r.scholar_hit.year,
+                            "venue": r.scholar_hit.venue,
+                            "cited_by": r.scholar_hit.cited_by,
+                            "cluster_id": r.scholar_hit.cluster_id,
+                        } if r.scholar_hit else None
+                    ),
+                    "grounding": _grnd(r.grounding),
+                }
+                for r in self.results
+            ],
+        }
+
 
 def _split_paragraphs(text: str) -> list[str]:
     return [p for p in _PARA_BOUNDARY.split(text) if p.strip()]
