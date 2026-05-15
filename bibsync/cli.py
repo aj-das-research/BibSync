@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -1321,6 +1322,219 @@ def repair_cmd(
             console.print(bp.dumps(db, writer=w))
     else:
         console.print(f"[green]Appended[/green] repaired entries to {bib_output}")
+
+
+# bench ------------------------------------------------------------------------
+
+
+@main.group(name="bench")
+def bench_group() -> None:
+    """Citation-verification benchmark — measure changes to retrieval/judge quality.
+
+    Run labeled (claim, paper, expected-verdict) cases through the production
+    audit pipeline and report accuracy, false-deletion rate, and per-label
+    precision/recall/F1. Lives in ``benchmarks/citation_verification.jsonl``
+    by default. Caches share infrastructure with ``bibsync audit``, so the
+    first run downloads every paper and subsequent runs are mostly LLM cost.
+    """
+
+
+_DEFAULT_BENCH_PATH = Path("benchmarks/citation_verification.jsonl")
+
+
+@bench_group.command(name="run")
+@click.option(
+    "--cases", "cases_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=_DEFAULT_BENCH_PATH,
+    show_default=True,
+    help="Path to the JSONL file of labeled benchmark cases.",
+)
+@click.option(
+    "--tier", type=click.IntRange(0, 2), default=2, show_default=True,
+    help="Maximum evidence tier to run cases at (each case still respects its "
+    "own min_tier).",
+)
+@click.option(
+    "--rag-top-k", type=int, default=5, show_default=True,
+    help="Tier-2 only: chunks retrieved per claim.",
+)
+@click.option(
+    "--embedding-backend",
+    type=click.Choice(["auto", "local", "api"]),
+    default="auto", show_default=True,
+)
+@click.option(
+    "--cache-dir", type=click.Path(path_type=Path), default=None,
+    help="Cache directory (defaults to platform user-cache).",
+)
+@click.option(
+    "--no-cache", is_flag=True, default=False,
+    help="Bypass caches; re-fetch all sources.",
+)
+@click.option(
+    "--confidence-floor", type=float, default=0.7, show_default=True,
+    help="Floor for converting supports=false to hallucinated (vs unverifiable).",
+)
+@click.option(
+    "--filter", "category_filter", default=None,
+    help="Only run cases whose ``category`` contains this substring.",
+)
+@click.option(
+    "--output-json", "output_json",
+    type=click.Path(path_type=Path), default=None,
+    help="Write the full report (per-case + metrics) to this JSON file.",
+)
+def bench_run(
+    cases_path: Path,
+    tier: int,
+    rag_top_k: int,
+    embedding_backend: str,
+    cache_dir: Optional[Path],
+    no_cache: bool,
+    confidence_floor: float,
+    category_filter: Optional[str],
+    output_json: Optional[Path],
+) -> None:
+    """Run every benchmark case and print precision/recall/F1 + false-deletion rate."""
+    from . import benchmark as bench_mod
+
+    llm_cfg = cfg.resolve_llm_config()
+    if not llm_cfg:
+        console.print(
+            "[red]No LLM API key configured.[/red] Set one with "
+            "[bold]bibsync config set openrouter_key sk-or-...[/bold]"
+        )
+        sys.exit(2)
+
+    cases = bench_mod.load_cases(cases_path)
+    if category_filter:
+        cases = [c for c in cases if category_filter.lower() in c.category.lower()]
+    if not cases:
+        console.print(f"[yellow]No cases matched filter {category_filter!r}.[/yellow]")
+        return
+
+    console.print(
+        f"[dim]Running [bold]{len(cases)}[/bold] case(s) at tier ≤ {tier} "
+        f"using {llm_cfg.provider} ({llm_cfg.model})[/dim]"
+    )
+
+    # Live progress — one line per case so the user can see slow ones.
+    def _on_case(i: int, total: int, case, r) -> None:
+        sym = "[green]✓[/green]" if r.correct else "[red]✗[/red]"
+        tier_label = ["meta", "abs", f"RAG×{rag_top_k}"][r.evidence_tier]
+        console.print(
+            f"  {sym} [{i:2d}/{total}] [{tier_label:>6s}] "
+            f"{case.id} → [bold]{r.predicted}[/bold] "
+            f"(exp [bold]{case.expected}[/bold], {r.elapsed_sec:.1f}s)"
+        )
+
+    report = bench_mod.run_benchmark_sync(
+        cases,
+        tier=tier,
+        cache_dir=cache_dir,
+        no_cache=no_cache,
+        rag_top_k=rag_top_k,
+        embedding_backend=embedding_backend,
+        model=None,
+        api_key=llm_cfg.api_key,
+        confidence_floor=confidence_floor,
+        only_kind="audit",
+        progress_cb=_on_case,
+    )
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    console.print()
+    console.print(
+        f"[bold]Accuracy:[/bold] {report.accuracy():.1%} "
+        f"([green]{sum(1 for r in report.results if r.correct)}[/green]/"
+        f"{len(report.results)})  "
+        f"[dim]({report.elapsed_sec:.1f}s total)[/dim]"
+    )
+    fdr = report.false_deletion_rate()
+    fdr_color = "green" if fdr == 0 else "yellow" if fdr <= 0.05 else "red"
+    console.print(
+        f"[bold]False-deletion rate:[/bold] [{fdr_color}]{fdr:.1%}[/{fdr_color}] "
+        "[dim](verified→hallucinated — the safety-critical metric)[/dim]"
+    )
+
+    # Per-label metrics table.
+    t = Table(title="Per-label metrics", show_lines=False)
+    t.add_column("Expected"); t.add_column("Support", justify="right")
+    t.add_column("Precision", justify="right"); t.add_column("Recall", justify="right")
+    t.add_column("F1", justify="right")
+    for label, m in report.per_label_metrics().items():
+        t.add_row(
+            label, str(int(m["support"])),
+            f"{m['precision']:.2f}", f"{m['recall']:.2f}", f"{m['f1']:.2f}",
+        )
+    console.print(t)
+
+    # Confusion matrix (compact).
+    conf = report.confusion()
+    if conf:
+        console.print("[bold]Confusion:[/bold] " + ", ".join(
+            f"{e}→{p}={c}" for (e, p), c in sorted(conf.items())
+        ))
+
+    # Failures detail — most useful when iterating on the pipeline.
+    failures = [r for r in report.results if not r.correct]
+    if failures:
+        console.print()
+        console.print(f"[bold red]✗ {len(failures)} failure(s):[/bold red]")
+        for r in failures:
+            console.print(
+                f"  • [yellow]{r.case.id}[/yellow] "
+                f"(category={r.case.category}, tier={r.evidence_tier})"
+            )
+            console.print(
+                f"    expected=[bold]{r.case.expected}[/bold], "
+                f"predicted=[bold]{r.predicted}[/bold] "
+                f"(conf={r.confidence:.2f})"
+            )
+            console.print(f"    reason: [dim]{r.reasoning}[/dim]")
+
+    if output_json:
+        output_json.write_text(
+            json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+        )
+        console.print(f"\n[dim]Full report written to {output_json}[/dim]")
+
+
+@bench_group.command(name="show")
+@click.option(
+    "--cases", "cases_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=_DEFAULT_BENCH_PATH, show_default=True,
+)
+def bench_show(cases_path: Path) -> None:
+    """Print a table of every benchmark case (no LLM calls)."""
+    from . import benchmark as bench_mod
+
+    cases = bench_mod.load_cases(cases_path)
+    t = Table(title=f"Benchmark cases — {cases_path}", show_lines=False)
+    t.add_column("#", justify="right", style="dim")
+    t.add_column("ID")
+    t.add_column("Category")
+    t.add_column("Expected")
+    t.add_column("Min tier", justify="right")
+    t.add_column("Claim")
+    for i, c in enumerate(cases, 1):
+        t.add_row(
+            str(i), c.id, c.category, c.expected, str(c.min_tier),
+            (c.claim[:60] + "…") if len(c.claim) > 60 else c.claim,
+        )
+    console.print(t)
+    by_expected: dict[str, int] = {}
+    by_category: dict[str, int] = {}
+    for c in cases:
+        by_expected[c.expected] = by_expected.get(c.expected, 0) + 1
+        by_category[c.category] = by_category.get(c.category, 0) + 1
+    console.print(
+        f"[dim]{len(cases)} cases | "
+        f"by expected: {dict(sorted(by_expected.items()))} | "
+        f"by category: {len(by_category)} unique[/dim]"
+    )
 
 
 # Helpers ----------------------------------------------------------------------

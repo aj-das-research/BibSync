@@ -1,0 +1,240 @@
+{
+  "n_cases": 18,
+  "accuracy": 0.7777777777777778,
+  "false_deletion_rate": 0.0,
+  "elapsed_sec": 133.49048166699998,
+  "per_label": {
+    "hallucinated": {
+      "support": 9,
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "f1": 0.8
+    },
+    "missing_in_bib": {
+      "support": 1,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "unverifiable": {
+      "support": 0,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0
+    },
+    "verified": {
+      "support": 8,
+      "precision": 0.7777777777777778,
+      "recall": 0.875,
+      "f1": 0.823529411764706
+    }
+  },
+  "confusion": {
+    "verified->verified": 7,
+    "verified->unverifiable": 1,
+    "hallucinated->hallucinated": 6,
+    "hallucinated->verified": 2,
+    "hallucinated->unverifiable": 1,
+    "missing_in_bib->missing_in_bib": 1
+  },
+  "cases": [
+    {
+      "id": "verified-vaswani-self-attention",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 3.16,
+      "reasoning": "The abstract states that the Transformer architecture 'dispensing with recurrence and convolutions entirely' and relies 'solely on attention mechanisms', which aligns with the claim about replacing recurrence with multi-head self-attention."
+    },
+    {
+      "id": "verified-bert-architecture-spec",
+      "category": "quantitative-architecture-spec",
+      "expected": "verified",
+      "predicted": "unverifiable",
+      "correct": false,
+      "confidence": 0.6,
+      "evidence_tier": 0,
+      "elapsed_sec": 4.44,
+      "reasoning": "metadata insufficient for quantitative claim about parameters and specific datasets used for pretraining"
+    },
+    {
+      "id": "hallucinated-gpt3-medqa-misattribution",
+      "category": "quantitative-misattribution-headline",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 5.83,
+      "reasoning": "The abstract and retrieved chunks do not mention 'MedQA' or any specific accuracy of '86.5%' \u2014 likely misattribution."
+    },
+    {
+      "id": "hallucinated-resnet-protein-structure",
+      "category": "field-cross-contamination",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 0,
+      "elapsed_sec": 3.5,
+      "reasoning": "The cited paper is focused on image recognition and does not address protein structure prediction, indicating a clear topic mismatch."
+    },
+    {
+      "id": "verified-resnet-image-classification",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 0,
+      "elapsed_sec": 4.22,
+      "reasoning": "The cited paper discusses deep residual networks and their use of identity shortcuts for training deep convolutional networks, which aligns with the claim about training reliability for image classification."
+    },
+    {
+      "id": "hallucinated-version-conflict-gpt4-for-gpt3",
+      "category": "version-conflict",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.7,
+      "evidence_tier": 0,
+      "elapsed_sec": 4.94,
+      "reasoning": "The cited paper is about GPT-4, which is a different model than GPT-3, and does not directly support the claim about GPT-3's few-shot learning capabilities."
+    },
+    {
+      "id": "hallucinated-survey-cited-as-original",
+      "category": "survey-vs-original",
+      "expected": "hallucinated",
+      "predicted": "verified",
+      "correct": false,
+      "confidence": 0.8,
+      "evidence_tier": 0,
+      "elapsed_sec": 5.17,
+      "reasoning": "The paper's title indicates it discusses the attention mechanism, which aligns with the claim about addressing long-range dependency limitations in recurrent networks."
+    },
+    {
+      "id": "verified-bert-paradigm-claim",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 0,
+      "elapsed_sec": 18.59,
+      "reasoning": "The paper's title explicitly mentions BERT and its role in pre-training for language understanding, aligning well with the claim."
+    },
+    {
+      "id": "hallucinated-wrong-paper-for-imagenet-result",
+      "category": "quantitative-cross-paper",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 11.12,
+      "reasoning": "The cited paper discusses residual networks and their performance on ImageNet, but it does not mention AlexNet or the specific top-5 error rates of 15.3% or 26.2% \u2014 likely misattribution."
+    },
+    {
+      "id": "verified-generic-background-with-vaswani",
+      "category": "generic-background",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.63,
+      "reasoning": "The abstract states that the Transformer architecture 'dispensing with recurrence and convolutions entirely' has become a dominant model in sequence transduction, which aligns with the claim about transformer-based architectures being dominant in modern NLP."
+    },
+    {
+      "id": "hallucinated-bert-cv-claim",
+      "category": "field-cross-contamination",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 0,
+      "elapsed_sec": 21.15,
+      "reasoning": "The cited paper is focused on language understanding, while the claim pertains to image classification on ImageNet, indicating a clear topic mismatch."
+    },
+    {
+      "id": "verified-gpt3-fewshot-claim",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.24,
+      "reasoning": "The abstract states that 'scaling up language models greatly improves task-agnostic, few-shot performance,' which aligns with the claim about GPT-3's strong few-shot performance across diverse NLP tasks."
+    },
+    {
+      "id": "hallucinated-fabricated-author-year",
+      "category": "fabricated-citation",
+      "expected": "hallucinated",
+      "predicted": "verified",
+      "correct": false,
+      "confidence": 0.9,
+      "evidence_tier": 0,
+      "elapsed_sec": 19.08,
+      "reasoning": "The paper's title directly references 'Rectified Flow Matching' and 'Accelerated Diffusion Training', which aligns with the claim about training diffusion models faster."
+    },
+    {
+      "id": "verified-resnet-deep-network-claim",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.43,
+      "reasoning": "The paper discusses how residual connections help address the degradation problem in deep networks, stating that 'the 34-layer ResNet exhibits considerably lower training error and is generalizable to the validation data,' which supports the claim about enabling training of networks with hundreds of layers."
+    },
+    {
+      "id": "hallucinated-medqa-865-misattribution",
+      "category": "quantitative-misattribution",
+      "expected": "hallucinated",
+      "predicted": "unverifiable",
+      "correct": false,
+      "confidence": 0.55,
+      "evidence_tier": 0,
+      "elapsed_sec": 3.71,
+      "reasoning": "quantitative MedQA accuracy claim cannot be verified from metadata alone; needs abstract or full-text."
+    },
+    {
+      "id": "missing-in-bib-broken-key",
+      "category": "broken-reference",
+      "expected": "missing_in_bib",
+      "predicted": "missing_in_bib",
+      "correct": true,
+      "confidence": 1.0,
+      "evidence_tier": 0,
+      "elapsed_sec": 0.0,
+      "reasoning": "no bib_entry provided"
+    },
+    {
+      "id": "verified-bert-pretraining-data",
+      "category": "factual-content-claim",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 0,
+      "elapsed_sec": 19.14,
+      "reasoning": "The paper's title indicates it discusses BERT, and it is well-known that BERT was pretrained on BookCorpus and English Wikipedia."
+    },
+    {
+      "id": "hallucinated-vaswani-libri-speech",
+      "category": "field-cross-contamination",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.12,
+      "reasoning": "The abstract and retrieved chunks focus on machine translation tasks and do not mention the LibriSpeech benchmark or any word error rate, indicating a clear topic mismatch."
+    }
+  ]
+}
