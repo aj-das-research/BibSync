@@ -38,6 +38,7 @@ from .crossref import search_crossref
 from .openalex import search_openalex
 from .semantic_scholar import search_semantic_scholar
 from .types import PaperContent
+from .unpaywall import resolve_pdf_url as unpaywall_pdf_url
 
 __all__ = [
     "PaperContent",
@@ -121,6 +122,17 @@ async def fetch_paper_content(
         cr = await search_crossref(title, doi=doi)
         if cr:
             result = _merge(result, cr) if result else cr
+
+    # 6. Unpaywall PDF enrichment — DOI → open-access PDF URL. Runs AFTER all
+    #    the content sources so it can use whichever DOI got resolved
+    #    (Crossref-by-DOI, OpenAlex's `ids.doi`, etc.). Closes the Tier-2 gap
+    #    for papers that have a known DOI but no PDF URL from the primary
+    #    sources — common for Nature / IEEE / ACM papers where the publisher
+    #    doesn't expose OA URLs but a green-OA repository copy exists.
+    if result and result.doi and not result.pdf_url:
+        oa_pdf = await unpaywall_pdf_url(result.doi)
+        if oa_pdf:
+            result.pdf_url = oa_pdf
 
     # Cache the merged result so subsequent runs skip the API hops.
     if result and cache:
