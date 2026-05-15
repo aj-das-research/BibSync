@@ -116,6 +116,97 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return num / (math.sqrt(na) * math.sqrt(nb))
 
 
+# ── hybrid retrieval helpers ────────────────────────────────────────────────
+
+
+# Alternatives are tried left-to-right. The %-suffixed variant must come
+# FIRST or the bare-number variant would match '86.5' and leave the '%'
+# unconsumed, breaking the discriminating-signal property we need on
+# quantitative claims.
+_BM25_TOKEN_RE = re.compile(r"\d+(?:\.\d+)?%|[A-Za-z]+(?:-[A-Za-z0-9]+)*|\d+(?:\.\d+)?")
+
+
+def _bm25_tokenize(text: str) -> list[str]:
+    """Lowercase + word-tokenize for BM25.
+
+    The regex preserves:
+      • alphanumeric words ('transformer', 'bert')
+      • numbers with optional decimal ('110', '86.5')
+      • percentages ('86.5%', '67.6%') — kept whole because BM25 treats
+        '86.5%' as a distinct token from '86.5'. For quantitative claims
+        the percent sign IS the discriminating signal (the LLM judges
+        '86.5% MedQA' against '67.6% MedQA').
+
+    This is intentionally simple — no stemming, no stopword removal. For
+    short academic claims (5-20 words) stemming hurts precision more than
+    recall, and stopword removal of "a/the/of" doesn't change BM25 scores
+    materially with default k1/b.
+    """
+    return [t.lower() for t in _BM25_TOKEN_RE.findall(text or "")]
+
+
+class _BM25Index:
+    """Per-paper Okapi BM25 index, built lazily and held in memory.
+
+    BM25 indexes are small (a corpus of ~100 chunks builds in <50ms) and
+    don't need to be cached to disk like dense embeddings do. We build
+    once per ``retrieve_hybrid`` call and let GC clean up after.
+
+    Stays a thin wrapper so the rest of the code can swap to a different
+    BM25 implementation (rank_bm25 → bm25s, retrieva, etc.) without
+    touching call sites.
+    """
+
+    def __init__(self, chunks: "list[Chunk]"):
+        from rank_bm25 import BM25Okapi  # type: ignore
+
+        self._chunks = chunks
+        tokenized = [_bm25_tokenize(c.text) for c in chunks]
+        # rank_bm25 raises on empty corpus — short-circuit instead.
+        self._bm25 = BM25Okapi(tokenized) if tokenized and any(tokenized) else None
+
+    def scores(self, query: str) -> list[float]:
+        """Return one BM25 score per chunk (same order as ``chunks``).
+
+        Returns an all-zeros list when the index is empty or the query
+        tokenises to zero tokens — keeps the caller's downstream merge
+        logic uniform.
+        """
+        if self._bm25 is None:
+            return [0.0] * len(self._chunks)
+        q_tokens = _bm25_tokenize(query)
+        if not q_tokens:
+            return [0.0] * len(self._chunks)
+        return [float(s) for s in self._bm25.get_scores(q_tokens)]
+
+
+def _rrf_fuse(
+    rank_lists: list[list[int]],
+    *,
+    k: int = 60,
+) -> list[tuple[int, float]]:
+    """Reciprocal Rank Fusion over multiple rankings.
+
+    Each input ``rank_lists[i]`` is a list of chunk indices in score-
+    descending order from one retriever. Returns ``[(chunk_idx, score),
+    ...]`` sorted by fused score descending.
+
+    The fused score for chunk i is ``sum(1/(k+rank_in_list_j))`` summed
+    across every list that ranks chunk i. The constant ``k=60`` is the
+    Cormack et al. (2009) default; lower k weights top-ranked items more
+    heavily, higher k spreads the contribution.
+
+    RRF is rank-only and scale-invariant, which is exactly what we need
+    to combine BM25 (raw scores in [0, ~50]) with dense cosine (in
+    [-1, 1]) without per-corpus normalisation.
+    """
+    fused: dict[int, float] = {}
+    for ranking in rank_lists:
+        for rank, idx in enumerate(ranking):
+            fused[idx] = fused.get(idx, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(fused.items(), key=lambda t: t[1], reverse=True)
+
+
 # Default models per backend. Both produce dense embeddings; cache is keyed by
 # the actual model name, so switching backends invalidates the cache cleanly.
 DEFAULT_LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
@@ -418,8 +509,26 @@ class EmbeddingStore:
         chunks: list[Chunk],
         *,
         top_k: int = 5,
+        hybrid: bool = True,
+        candidate_pool: int = 20,
     ) -> list[tuple[Chunk, float]]:
-        """Embed ``query`` and return top-K chunks by cosine similarity."""
+        """Retrieve the top-K chunks for ``query`` from ``chunks``.
+
+        Default = **hybrid retrieval**: combines dense (cosine over learned
+        embeddings) and lexical (BM25 over verbatim tokens) signals using
+        Reciprocal Rank Fusion. Catches verbatim-token evidence (exact
+        numbers, benchmark names, model names) that dense embeddings smear,
+        without losing the semantic-paraphrase recall that dense provides.
+
+        Set ``hybrid=False`` to force dense-only retrieval (e.g. for
+        ablation or when rank_bm25 isn't installed). Falls back to dense-
+        only automatically if rank_bm25 isn't importable, with a trace.
+
+        ``candidate_pool`` is the top-K each retriever returns before
+        fusion. Larger pools improve recall but cost more LLM-judge tokens
+        only if the LLM consumes the fused output; here we still return
+        only top_k after fusion, so the only cost is local computation.
+        """
         vectors = await self.index_paper(paper_key, chunks)
         if not vectors:
             return []
@@ -427,18 +536,71 @@ class EmbeddingStore:
         if not q_emb:
             return []
         q = q_emb[0]
-        scored: list[tuple[Chunk, float]] = []
-        for i, c in enumerate(chunks):
+
+        # Dense rankings (always).
+        dense_scored: list[tuple[int, float]] = []
+        for i in range(len(chunks)):
             if i < len(vectors):
-                scored.append((c, _cosine(q, vectors[i])))
-        scored.sort(key=lambda t: t[1], reverse=True)
-        result = scored[:top_k]
+                dense_scored.append((i, _cosine(q, vectors[i])))
+        dense_scored.sort(key=lambda t: t[1], reverse=True)
+        dense_top = dense_scored[:candidate_pool]
+        dense_rank = [i for i, _ in dense_top]
+
+        # Lexical (BM25) rankings — best-effort. Failure here just degrades
+        # to dense-only, never errors the audit run.
+        bm25_rank: list[int] = []
+        if hybrid:
+            try:
+                bm25 = _BM25Index(chunks)
+                bm25_scores = bm25.scores(query)
+                bm25_scored = sorted(
+                    enumerate(bm25_scores), key=lambda t: t[1], reverse=True
+                )
+                # Filter out 0-score entries — they contribute nothing
+                # informative and pollute the rank fusion.
+                bm25_rank = [i for i, s in bm25_scored if s > 0][:candidate_pool]
+            except ImportError:
+                dbg.trace(
+                    "audit.rag",
+                    "rank_bm25 not installed — degrading to dense-only retrieval",
+                )
+            except Exception as e:
+                dbg.trace(
+                    "audit.rag",
+                    "BM25 indexing failed; using dense-only",
+                    error_type=type(e).__name__,
+                    error=str(e) or repr(e),
+                )
+
+        # Fuse rankings via RRF when we have both; otherwise dense-only.
+        if hybrid and bm25_rank:
+            fused = _rrf_fuse([dense_rank, bm25_rank])
+            top = fused[:top_k]
+            # For tracing, also expose the dense cosine of the chosen chunks
+            # so traces remain comparable to the pre-hybrid era.
+            dense_lookup = dict(dense_scored)
+            result = [(chunks[i], float(dense_lookup.get(i, 0.0))) for i, _ in top]
+            dbg.trace(
+                "audit.rag",
+                "retrieved (hybrid)",
+                key=paper_key,
+                top_k=top_k,
+                backend=self.effective_backend,
+                cosine_scores=[round(s, 3) for _, s in result],
+                dense_pool=len(dense_rank),
+                bm25_pool=len(bm25_rank),
+                fused_pool=len(fused),
+            )
+            return result
+
+        # Dense-only path — preserves prior behaviour.
+        result = [(chunks[i], s) for i, s in dense_top[:top_k]]
         dbg.trace(
             "audit.rag",
-            "retrieved",
+            "retrieved (dense-only)",
             key=paper_key,
             top_k=top_k,
             backend=self.effective_backend,
-            scores=[round(s, 3) for _, s in result],
+            cosine_scores=[round(s, 3) for _, s in result],
         )
         return result
