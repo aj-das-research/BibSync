@@ -312,11 +312,13 @@ async def _run_audit_case(
         api_key=api_key,
     )
 
-    # Translate (supports, confidence) → status using the same rules as
-    # audit.audit_project, so the benchmark scores the same predictions a real
-    # ``bibsync audit`` run would produce.
+    # Translate (supports, confidence, contradicted) → status using the same
+    # rules as audit.audit_project, so the benchmark scores the same
+    # predictions a real ``bibsync audit`` run would produce.
     if verdict.supports:
         predicted = "verified"
+    elif verdict.contradicted and verdict.confidence >= confidence_floor:
+        predicted = "contradicted"
     elif verdict.confidence >= confidence_floor:
         predicted = "hallucinated"
     else:

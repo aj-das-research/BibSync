@@ -905,6 +905,7 @@ def audit_cmd(
     status_styles = {
         "verified": "[green]verified[/green]",
         "hallucinated": "[red]hallucinated[/red]",
+        "contradicted": "[bold red]contradicted[/bold red]",
         "unverifiable": "[yellow]unverifiable[/yellow]",
         "missing_in_bib": "[red]missing_in_bib[/red]",
     }
@@ -937,10 +938,10 @@ def audit_cmd(
 
     summary = report.summary()
     parts = []
-    for status in ("verified", "hallucinated", "unverifiable", "missing_in_bib"):
+    for status in ("verified", "hallucinated", "contradicted", "unverifiable", "missing_in_bib"):
         if status in summary:
             color = "green" if status == "verified" else (
-                "red" if status in ("hallucinated", "missing_in_bib") else "yellow"
+                "red" if status in ("hallucinated", "contradicted", "missing_in_bib") else "yellow"
             )
             parts.append(f"[{color}]{summary[status]} {status}[/{color}]")
     console.print(f"[bold]Summary:[/bold] " + ", ".join(parts))

@@ -57,7 +57,7 @@ class CitationCheck:
     char_offset: int  # offset of the \cite{...} call start in the source file
     claim_text: str  # the surrounding sentence (with the \cite{} call stripped)
     bib_entry: Optional[dict] = None
-    status: str = "pending"  # "verified" | "hallucinated" | "unverifiable" | "missing_in_bib"
+    status: str = "pending"  # verified | hallucinated | contradicted | unverifiable | missing_in_bib
     confidence: float = 0.0
     reasoning: str = ""
     fixed: bool = False  # True if --fix replaced the \cite{} in the .tex
@@ -229,6 +229,53 @@ def _is_quantitative_claim(claim: str) -> bool:
     """True if the claim contains a specific number, benchmark name, or other
     quantitative content that metadata alone cannot verify."""
     return bool(_QUANTITATIVE_CLAIM_RE.search(claim or ""))
+
+
+# Pattern matches the specific *value* in a quantitative claim. Used to build
+# a "contradiction query" — same entities and benchmark names but stripped of
+# the claim's specific number, so retrieval surfaces chunks reporting the
+# paper's ACTUAL value for the same entity.
+_QUANTITATIVE_VALUE_RE = re.compile(
+    r"""
+    \b\d+(?:\.\d+)?\s*%                            # "86.5%"
+    | \b\d[\d,.]*\s*(?:M|B|K)?\s*(?:billion|million|trillion)?\s*  # "100 billion"
+      (?:parameters|params|layers|epochs|steps)\b
+    | \b\d+(?:\.\d+)?\s*(?:billion|million|trillion)\s+parameters?\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def _make_contradiction_query(claim: str) -> Optional[str]:
+    """Build a retrieval query that targets contradicting evidence for a
+    quantitative claim.
+
+    Strategy: strip the specific *value* (e.g. "86.5%", "100 billion params")
+    while keeping the discriminating entities (benchmark name, model name).
+    The resulting query retrieves chunks discussing the same benchmark/entity
+    with whatever value the paper actually reports — if that differs from the
+    claim's value, the LLM judge sees both and can output contradicted=true.
+
+    Returns ``None`` if the claim isn't quantitative or has nothing to strip
+    (in which case the regular hybrid retrieval is sufficient).
+
+    Example::
+
+        "GPT-3 achieves 86.5% on MedQA"   →   "GPT-3 achieves on MedQA"
+        "ResNet-50 with 100 billion params" →  "ResNet-50 with"
+    """
+    if not _is_quantitative_claim(claim):
+        return None
+    stripped = _QUANTITATIVE_VALUE_RE.sub("", claim).strip()
+    # Collapse any double spaces created by the substitution.
+    stripped = re.sub(r"\s{2,}", " ", stripped)
+    # If stripping removed substantively all content, retrieval would be too
+    # broad — skip the contradiction query and rely on the normal retrieval.
+    if len(stripped.split()) < 3:
+        return None
+    if stripped == claim:
+        return None
+    return stripped
 
 
 # --- main pipeline ---------------------------------------------------------
@@ -455,6 +502,36 @@ async def audit_project(
                         ]
                         check.n_chunks = len(retrieved_chunk_texts)
 
+                        # Contradiction retrieval — only when the claim is
+                        # quantitative AND a value-stripped query is non-trivial.
+                        # Retrieves a SMALL extra pool of chunks (top-3) using a
+                        # query that targets the same entity without the claim's
+                        # specific value, so the LLM can spot conflicting numbers.
+                        contradiction_q = _make_contradiction_query(check.claim_text)
+                        if contradiction_q:
+                            extra = await embed_store.retrieve(
+                                query=contradiction_q,
+                                paper_key=paper_key,
+                                chunks=chunks,
+                                top_k=3,
+                            )
+                            # De-dupe: only add chunks not already in `top`.
+                            already = {id(c) for c, _ in top}
+                            extra_texts = [
+                                f"[p.{c.page or '?'}] {c.text}"
+                                for c, _ in extra
+                                if id(c) not in already
+                            ]
+                            if extra_texts:
+                                retrieved_chunk_texts.extend(extra_texts)
+                                check.n_chunks = len(retrieved_chunk_texts)
+                                dbg.trace(
+                                    "audit.contradict",
+                                    "added chunks",
+                                    n_extra=len(extra_texts),
+                                    query=contradiction_q[:80],
+                                )
+
         # Record what tier we actually achieved (may be lower than the requested
         # ``tier`` if the paper wasn't on arXiv/SS/Crossref or had no PDF).
         if retrieved_chunk_texts:
@@ -523,6 +600,13 @@ async def audit_project(
             )
         elif verdict.supports:
             check.status = "verified"
+        elif verdict.contradicted and verdict.confidence >= confidence_floor:
+            # Distinct from `hallucinated`: the paper exists, IS the right
+            # canonical source for the topic, but reports a DIFFERENT value
+            # than the claim states. User action: fix the prose, not the
+            # citation. --fix DOES NOT auto-edit these (different from
+            # hallucinated) because the cite itself is correct.
+            check.status = "contradicted"
         elif verdict.confidence >= confidence_floor:
             check.status = "hallucinated"
         else:

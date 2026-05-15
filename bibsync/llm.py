@@ -964,11 +964,17 @@ class CitationAudit:
     paper to cite?"; this one asks the broader "is this paper a reasonable citation
     for this claim, or is it a topic mismatch / hallucination?". A non-canonical
     paper can still be a fine citation.
+
+    ``contradicted`` is the strongest negative signal: the retrieved evidence
+    actively refutes the claim (e.g. claim says "90% on MedQA", paper chunk says
+    "17.8% on MedQA"). The caller maps this to a distinct user-facing status so
+    the user can FIX the prose rather than DELETE the citation.
     """
 
     supports: bool
     confidence: float  # 0.0 - 1.0
     reasoning: str
+    contradicted: bool = False  # paper actively reports something different
 
 
 _AUDIT_CITATION_SYSTEM = """\
@@ -1006,10 +1012,17 @@ confidently. False supports>0.85 should only be returned when you're certain.
 
 Return a single JSON object:
   {
-    "supports": true | false,
-    "confidence": 0.0 to 1.0,
-    "reasoning": "one short sentence — what tells you it does or doesn't support"
+    "supports":    true | false,
+    "confidence":  0.0 to 1.0,
+    "reasoning":   "one short sentence — what tells you it does or doesn't support",
+    "contradicted": true | false   // OPTIONAL — see Tier-2 suffix
   }
+
+The ``contradicted`` field defaults to false. Set it to true ONLY when the
+retrieved evidence actively REFUTES the claim with a specific conflicting
+value (e.g. claim says "X reaches 90% on Y", retrieved chunk says "X reaches
+17.8% on Y"). Mere absence of evidence is NOT contradiction — that's just
+unsupported. See the Tier-2 suffix for the precise rule.
 """
 
 
@@ -1125,6 +1138,30 @@ DO NOT paraphrase generously. DO NOT infer that because the paper "evaluates
 many benchmarks" it must therefore evaluate the specific benchmark in the
 claim. The retrieved chunks are the only evidence — if a number or named
 entity isn't in them, you cannot verify it.
+
+═════════════════════════════════════════════════════════════════════
+CONTRADICTION DETECTION (contradicted=true)
+═════════════════════════════════════════════════════════════════════
+Set ``"contradicted": true`` in your JSON when the retrieved chunks contain
+a SPECIFIC CONFLICTING VALUE for the same entity in the claim. Examples:
+
+  claim:   "GPT-3 reaches 90% on MedQA"
+  chunk:   "p.18 reports GPT-3 17.8% on MedQA closed-book"
+  → supports=false, conf=0.95, contradicted=true,
+    reasoning="paper reports GPT-3 17.8% on MedQA (p.18), not 90%"
+
+  claim:   "BERT-base has 220M parameters"
+  chunk:   "BERTBASE (L=12, H=768, A=12, Total Parameters=110M)"
+  → supports=false, conf=0.95, contradicted=true,
+    reasoning="paper specifies BERT-base has 110M parameters, not 220M"
+
+Contradiction is STRICTLY STRONGER than "no support":
+  • no support  = chunks don't mention the specific number/entity in claim
+  • contradicted = chunks mention the same entity with a DIFFERENT value
+
+When in doubt, prefer supports=false without contradicted=true (the safer
+verdict). Only set contradicted=true when you can quote a chunk that names
+the same benchmark/entity with a value that conflicts with the claim's value.
 """
 
 
@@ -1236,12 +1273,14 @@ def audit_citation(
         supports=bool(data.get("supports", True)),
         confidence=float(data.get("confidence") or 0.0),
         reasoning=str(data.get("reasoning") or ""),
+        contradicted=bool(data.get("contradicted", False)),
     )
     dbg.trace(
         "llm.audit",
         "verdict",
         tier=tier,
         supports=verdict.supports,
+        contradicted=verdict.contradicted,
         conf=round(verdict.confidence, 2),
         reason=verdict.reasoning,
     )
