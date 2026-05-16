@@ -7,26 +7,6 @@
  * because they're the same dataclass `.to_dict()` outputs the CLI uses.
  */
 
-// ── native-messaging wire protocol ──────────────────────────────────────────
-
-/** Request the service worker sends to the native host. */
-export interface NativeRequest {
-  id: string;
-  method: "GET" | "POST" | "DELETE";
-  path: string;
-  body?: unknown;
-  query?: Record<string, string>;
-}
-
-/** Response the native host returns. */
-export interface NativeResponse {
-  id: string;
-  ok: boolean;
-  status: number;
-  body?: unknown;
-  error?: string;
-}
-
 // ── audit result shapes (mirror bibsync/audit.py AuditReport.to_dict) ───────
 
 export interface EvidenceSpan {
@@ -140,10 +120,14 @@ export interface Settings {
   tier: 0 | 1 | 2;
   embeddingBackend: "auto" | "local" | "api";
   ragTopK: number;
+  /** Bearer token — only needed when `bibsync serve --token` was used.
+   *  Empty for the default (no-auth, localhost-only) server. */
+  serverToken: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
   tier: 2,
   embeddingBackend: "auto",
   ragTopK: 5,
+  serverToken: "",
 };

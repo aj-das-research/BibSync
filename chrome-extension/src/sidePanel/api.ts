@@ -1,14 +1,16 @@
 /**
  * Side-panel API helper.
  *
- * The side panel can't open native-messaging ports itself (only the
- * service worker can). So every server call is wrapped as a
- * `chrome.runtime.sendMessage` to the worker, which forwards to the
- * native host, which forwards to `bibsync serve`.
+ * The side panel is a chrome-extension:// page. With `host_permissions`
+ * declared for http://127.0.0.1:38476/* in the manifest, it can
+ * `fetch()` the local `bibsync serve` directly — no native messaging,
+ * no service-worker hop, no CORS problem.
  *
- *   side panel → worker → native host → bibsync serve
+ *   side panel  ──fetch──▶  bibsync serve
  *
- * This module hides that chain behind plain async functions.
+ * The optional bearer token (only when the server was started with
+ * `--token`) is read from chrome.storage.local, where the Settings tab
+ * stores it.
  */
 import type {
   AuditReport,
@@ -16,25 +18,79 @@ import type {
   EvidenceReport,
   HealthInfo,
   MemoryRecord,
-  NativeResponse,
 } from "../types";
 
-/** Forward a native-host request through the service worker. */
-async function viaWorker(request: {
+/** Base URL of the local server — matches `bibsync serve`'s default. */
+const SERVER_URL = "http://127.0.0.1:38476";
+
+/** Normalised response shape (kept stable for all callers). */
+interface ServerResponse {
+  ok: boolean;
+  status: number;
+  body?: unknown;
+  error?: string;
+}
+
+/** Read the optional bearer token the Settings tab persisted. */
+async function getServerToken(): Promise<string> {
+  try {
+    const stored = await chrome.storage.local.get("bibsync.settings");
+    return (stored["bibsync.settings"]?.serverToken as string) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/** Fetch the local server directly. Never throws — failures come back
+ *  as { ok:false }. A network failure (server not running) yields an
+ *  error containing "could not reach" so the UI can show the right
+ *  "BibSync not running" state. */
+async function serverFetch(request: {
   method: "GET" | "POST" | "DELETE";
   path: string;
   body?: unknown;
   query?: Record<string, string>;
-}): Promise<NativeResponse> {
-  const resp = (await chrome.runtime.sendMessage({
-    kind: "native",
-    request,
-  })) as NativeResponse;
-  if (!resp) {
-    throw new Error("no response from service worker");
+}): Promise<ServerResponse> {
+  const token = await getServerToken();
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  let url = SERVER_URL + request.path;
+  if (request.query && Object.keys(request.query).length > 0) {
+    url += "?" + new URLSearchParams(request.query).toString();
   }
-  return resp;
+
+  try {
+    const resp = await fetch(url, {
+      method: request.method,
+      headers,
+      body: request.body !== undefined ? JSON.stringify(request.body) : undefined,
+    });
+    const text = await resp.text();
+    let parsed: unknown;
+    try {
+      parsed = text ? JSON.parse(text) : undefined;
+    } catch {
+      parsed = text;
+    }
+    if (!resp.ok) {
+      const detail =
+        (parsed as { detail?: string })?.detail ?? `HTTP ${resp.status}`;
+      return { ok: false, status: resp.status, body: parsed, error: detail };
+    }
+    return { ok: true, status: resp.status, body: parsed };
+  } catch (e) {
+    // fetch() rejects only on network-level failure — server not running.
+    return {
+      ok: false,
+      status: 0,
+      error: `could not reach bibsync serve at ${SERVER_URL} — is it running?`,
+    };
+  }
 }
+
+/** Back-compat alias — existing call sites use viaWorker(). */
+const viaWorker = serverFetch;
 
 /** GET /health — also doubles as the connection probe. */
 export async function checkHealth(): Promise<HealthInfo> {

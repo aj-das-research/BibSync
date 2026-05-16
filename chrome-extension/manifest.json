@@ -5,7 +5,6 @@
   "description": "Verify citations against paper content, detect hallucinated references, and suggest sources — directly in Overleaf.",
   "minimum_chrome_version": "116",
   "permissions": [
-    "nativeMessaging",
     "sidePanel",
     "storage",
     "activeTab",
@@ -13,7 +12,9 @@
   ],
   "host_permissions": [
     "https://www.overleaf.com/*",
-    "https://*.overleaf.com/*"
+    "https://*.overleaf.com/*",
+    "http://127.0.0.1:38476/*",
+    "http://localhost:38476/*"
   ],
   "background": {
     "service_worker": "serviceWorker.js",

@@ -63,6 +63,7 @@ async function loadSettings(): Promise<void> {
   ($("set-tier") as HTMLSelectElement).value = String(settings.tier);
   ($("set-backend") as HTMLSelectElement).value = settings.embeddingBackend;
   ($("set-topk") as HTMLInputElement).value = String(settings.ragTopK);
+  ($("set-token") as HTMLInputElement).value = settings.serverToken;
 }
 
 async function saveSettings(): Promise<void> {
@@ -74,6 +75,7 @@ async function saveSettings(): Promise<void> {
       1,
       Math.min(20, Number(($("set-topk") as HTMLInputElement).value) || 5),
     ),
+    serverToken: ($("set-token") as HTMLInputElement).value.trim(),
   };
   await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
   const el = $("set-status");
@@ -845,7 +847,7 @@ $$(".tab").forEach((b) =>
 btnCheck.addEventListener("click", () => void runCheck());
 btnEvidence.addEventListener("click", () => void runFindCitation());
 $("btn-memory-refresh").addEventListener("click", () => void loadMemory());
-for (const id of ["set-tier", "set-backend", "set-topk"]) {
+for (const id of ["set-tier", "set-backend", "set-topk", "set-token"]) {
   $(id).addEventListener("change", () => void saveSettings());
 }
 

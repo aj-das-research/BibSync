@@ -1385,23 +1385,23 @@ def source_rank_cmd(
     "--log-level", default="info", show_default=True,
     type=click.Choice(["critical", "error", "warning", "info", "debug"]),
 )
-def serve_cmd(host: str, port: int, log_level: str) -> None:
+@click.option(
+    "--token/--no-token", "use_token", default=False, show_default=True,
+    help="Require a bearer token. Default --no-token: the server is "
+    "127.0.0.1-only and runs without auth (zero-friction for the Chrome "
+    "extension). Use --token on a shared machine; paste the printed token "
+    "into the extension's Settings tab.",
+)
+def serve_cmd(host: str, port: int, log_level: str, use_token: bool) -> None:
     """Start the local HTTP+JSON server.
 
-    Drives the AI from non-CLI clients (Chrome extension, VS Code,
-    scripts, CI). On launch:
+    Drives the AI from the Chrome extension (and any other local client).
+    Binds 127.0.0.1:38476 by default.
 
-      • Generates a fresh per-process bearer token.
-      • Writes the token to ~/.config/bibsync/server.token (mode 0600).
-      • Binds 127.0.0.1:38476 by default.
+    Auth: --no-token (default) runs open on localhost — the network bind
+    is the boundary. --token generates a bearer token for shared machines.
 
-    Clients must include Authorization: Bearer <token> on every request.
-    The token is regenerated on each launch — no long-lived secrets
-    on disk between runs.
-
-    Stop with Ctrl+C; the token file persists but stops being valid.
-
-    OpenAPI docs at http://127.0.0.1:38476/docs after launch.
+    Stop with Ctrl+C. OpenAPI docs at http://127.0.0.1:38476/docs.
     """
     try:
         from . import server as server_mod
@@ -1409,7 +1409,9 @@ def serve_cmd(host: str, port: int, log_level: str) -> None:
         console.print(f"[red]{e}[/red]")
         sys.exit(2)
     try:
-        server_mod.run_server(host=host, port=port, log_level=log_level)
+        server_mod.run_server(
+            host=host, port=port, log_level=log_level, use_token=use_token,
+        )
     except RuntimeError as e:
         console.print(f"[red]{e}[/red]")
         sys.exit(2)

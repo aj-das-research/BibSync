@@ -223,15 +223,15 @@ def create_app(*, token: Optional[str] = None):
         )
 
     # ── auth dependency ────────────────────────────────────────────────────
+    # ``token`` is authoritative: None means NO auth (the --no-token default;
+    # the server is 127.0.0.1-bound). We deliberately do NOT fall back to a
+    # token file on disk — a stale file from a past --token run would
+    # otherwise silently re-enable auth and reject the extension.
     expected_token = token
-    if expected_token is None:
-        p = _token_path()
-        if p.exists():
-            expected_token = p.read_text(encoding="utf-8").strip()
 
     def require_auth(authorization: Optional[str] = Header(None)) -> None:
         if not expected_token:
-            return  # no token configured — trust mode (tests only)
+            return  # no token configured — open on localhost
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -250,11 +250,38 @@ def create_app(*, token: Optional[str] = None):
         title="BibSync",
         version=__version__,
         description=(
-            "Local-first citation AI server. All endpoints expect "
-            "Authorization: Bearer <token> matching the token written to "
-            "~/.config/bibsync/server.token by `bibsync serve`."
+            "Local-first citation AI server. The Chrome extension (an "
+            "extension-origin page) fetches these endpoints directly. "
+            "Auth is optional — when a token is configured, send "
+            "Authorization: Bearer <token>."
         ),
     )
+
+    # ── CORS + Private Network Access ──────────────────────────────────────
+    # The Chrome extension's side panel is a chrome-extension:// page; it
+    # fetches this server directly. Extension pages with host_permissions
+    # bypass CORS, but a permissive policy here is cheap insurance and also
+    # lets a plain browser tab / curl hit the server. Origins are wide open
+    # because the server is 127.0.0.1-bound — the network layer is the real
+    # boundary, not CORS.
+    from fastapi.middleware.cors import CORSMiddleware
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.middleware("http")
+    async def _allow_private_network(request, call_next):
+        """Chrome's Private Network Access sends a preflight with
+        ``Access-Control-Request-Private-Network: true`` when a page
+        reaches a local-network address. Answer it so the extension's
+        localhost fetches aren't blocked on newer Chrome."""
+        response = await call_next(request)
+        response.headers["Access-Control-Allow-Private-Network"] = "true"
+        return response
 
     from fastapi import Depends as _Depends
 
@@ -471,12 +498,20 @@ def run_server(
     host: str = "127.0.0.1",
     port: int = 38476,
     log_level: str = "info",
+    use_token: bool = False,
 ) -> None:
-    """Launch the server with a freshly generated token. Blocks until killed.
+    """Launch the server. Blocks until killed.
 
-    Refuses external binds unless the user explicitly opts in via the
-    env var ``BIBSYNC_ALLOW_EXTERNAL=1`` — manuscript content is
-    sensitive; we default to local-only.
+    Auth model:
+      • ``use_token=False`` (default) — no auth. The server is
+        127.0.0.1-bound; the network layer is the boundary. Zero-friction
+        for the Chrome extension, which then needs no token.
+      • ``use_token=True`` — generate a bearer token, write it to
+        ``server.token``. Every request must carry it. Use on shared
+        machines; the extension's Settings tab has a token field.
+
+    Refuses external binds unless ``BIBSYNC_ALLOW_EXTERNAL=1`` is set —
+    manuscript content stays local.
     """
     import uvicorn
 
@@ -488,10 +523,13 @@ def run_server(
             "override (NOT recommended — manuscript content stays local)."
         )
 
-    token = generate_token()
+    token = generate_token() if use_token else None
     print(f"[bibsync serve] Listening on http://{host}:{port}")
-    print(f"[bibsync serve] Bearer token written to {_token_path()}")
-    print(f"[bibsync serve] (mode 0600; clients read it from there)")
+    if token:
+        print(f"[bibsync serve] Bearer token written to {_token_path()}")
+        print("[bibsync serve] Paste it into the extension's Settings tab.")
+    else:
+        print("[bibsync serve] No auth (127.0.0.1-only). Pass --token to require a bearer token.")
 
     app = create_app(token=token)
     uvicorn.run(app, host=host, port=port, log_level=log_level)

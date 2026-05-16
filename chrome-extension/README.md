@@ -1,12 +1,10 @@
 # BibSync Chrome extension (Overleaf citation assistant)
 
-Read-only MVP: open Overleaf, open the BibSync side panel, click **Check** —
-see which `\cite{}` calls are verified / hallucinated / contradicted, with
-evidence quotes from the actual papers.
-
-> **Sprint E scope.** This is the read-only build — it displays issues and
-> evidence but does **not** edit your manuscript. User-approved editing
-> (insert / replace / append) lands in Sprint F.
+Open Overleaf, open the BibSync side panel, click **Check** — see which
+`\cite{}` calls are verified / hallucinated / contradicted, with evidence
+quotes from the actual papers. Apply user-approved fixes (remove a
+hallucinated cite, insert a suggested one) through a before/after diff
+preview — nothing edits your manuscript without an explicit Accept click.
 
 ## Architecture
 
@@ -16,16 +14,14 @@ Overleaf page
        │  chrome.tabs message
        ▼
 Side panel  (index.ts)
-       │  chrome.runtime message  { kind: "native", request }
-       ▼
-Service worker  (serviceWorker.ts)
-       │  chrome.runtime.connectNative
-       ▼
-Native messaging host  (../native-host/bibsync_native_host.py)
-       │  HTTP + Bearer token
+       │  fetch()  — direct, host_permissions grants localhost access
        ▼
 bibsync serve   →   BibSync core (audit / evidence / RAG / memory)
 ```
+
+The side panel is a `chrome-extension://` page; with `host_permissions`
+for `http://127.0.0.1:38476/*` declared in the manifest it `fetch()`es
+the local server directly — no native-messaging host, no wrapper script.
 
 The extension never runs the AI. It ships the editor's text to `bibsync
 serve`, which runs the verification pipeline locally.
@@ -52,27 +48,21 @@ npm run build        # → dist/
 1. Visit `chrome://extensions`.
 2. Toggle **Developer mode** (top-right).
 3. Click **Load unpacked** → select `chrome-extension/dist/`.
-4. Copy the extension's **ID** (a 32-char string under its name).
 
-### 3. Install the native messaging host
-```bash
-bibsync native-host install --extension-id <THE-ID-FROM-STEP-2>
-```
-(For quick local dev you can use `--extension-id "*"`, which lets any
-extension launch the host — fine on a personal machine, not for a
-shared one.)
-
-### 4. Start the server
+### 3. Start the server
 ```bash
 bibsync serve
 ```
-Leave this running in a terminal. It writes a bearer token the native
-host reads automatically.
+Leave it running in a terminal. By default it runs **without auth** on
+`127.0.0.1:38476` — nothing else to configure.
 
-### 5. Use it
+> Shared machine? Use `bibsync serve --token`, then paste the printed
+> token into the extension's **Settings → Server token** field.
+
+### 4. Use it
 1. Open an Overleaf project.
 2. Click the BibSync toolbar icon → the side panel opens.
-3. The header shows **connected** once it reaches `bibsync serve`.
+3. The header shows **connected** within ~2s.
 4. Click **Check selected text** — audits every `\cite{}` in the current
    file and lists issues.
 5. Select a sentence without a citation and click **Find citation for
@@ -92,9 +82,9 @@ host reads automatically.
 | Symptom | Fix |
 |---|---|
 | Header stuck on "BibSync not running" | Start `bibsync serve` in a terminal |
-| Header shows "connection error" | Re-run `bibsync native-host install` with the correct extension ID |
+| Header shows "connection error" + you used `--token` | Paste the token into Settings → Server token (or restart `bibsync serve` without `--token`) |
 | "Couldn't read the Overleaf editor" | Click into the editor pane first; reload the Overleaf tab |
-| Native host log | `~/Library/Logs/bibsync-native-host.log` (macOS) |
+| Still red after a code change | Rebuild (`npm run build`) and reload the extension at `chrome://extensions` |
 
 ## Tabs
 
