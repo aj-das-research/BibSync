@@ -850,13 +850,47 @@ async def audit_project(
                         contradict=ctype.contradiction_query,
                         claim=check.claim_text[:80],
                     )
-                    top = await embed_store.retrieve(
-                        query=check.claim_text,
-                        paper_key=paper_key,
-                        chunks=chunks,
-                        top_k=effective_top_k,
-                        rerank=ctype.rerank,
-                    )
+                    # Query decomposition — for compound claims like "X
+                    # achieves Y on Z while using W", retrieve per sub-claim
+                    # and union the top-K. Falls back to single-query
+                    # retrieval when the claim doesn't decompose.
+                    from .audit_rag import decompose_claim
+                    sub_claims = decompose_claim(check.claim_text)
+                    if len(sub_claims) > 1:
+                        dbg.trace(
+                            "audit.decompose",
+                            "compound claim",
+                            n_subclaims=len(sub_claims),
+                            subclaims=sub_claims,
+                        )
+                        # Per-sub-claim top-K, then deduplicate by chunk id.
+                        seen: dict[int, tuple] = {}
+                        for sc in sub_claims:
+                            sub_top = await embed_store.retrieve(
+                                query=sc,
+                                paper_key=paper_key,
+                                chunks=chunks,
+                                top_k=max(3, effective_top_k // len(sub_claims) + 1),
+                                rerank=ctype.rerank,
+                            )
+                            for c, score in sub_top:
+                                # Use chunk_idx as the dedup key; score is the
+                                # max across all sub-claims that found it.
+                                key = c.chunk_idx
+                                prior_score = seen.get(key, (None, -1.0))[1]
+                                if score > prior_score:
+                                    seen[key] = (c, score)
+                        top = sorted(seen.values(), key=lambda t: t[1], reverse=True)[
+                            :effective_top_k
+                        ]
+                    else:
+                        top = await embed_store.retrieve(
+                            query=check.claim_text,
+                            paper_key=paper_key,
+                            chunks=chunks,
+                            top_k=effective_top_k,
+                            rerank=ctype.rerank,
+                        )
                     if not top:
                         tier2_failure_reason = "embedding_failed"
                     else:

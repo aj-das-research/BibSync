@@ -256,6 +256,51 @@ def _get_reranker(model_name: str = DEFAULT_RERANKER_MODEL) -> Optional[_CrossEn
         return None
 
 
+# ── query decomposition ─────────────────────────────────────────────────────
+
+
+# Coordinating connectives that often join two retrievable sub-claims in one
+# sentence. Kept short to avoid over-splitting; the goal is to catch genuine
+# "X using Y" or "X while Y" compound claims, not break every comma.
+_COMPOUND_SPLIT_RE = re.compile(
+    r"\s+(?:while|whilst|using|with|though|although|and\s+(?:also|then|additionally))\s+",
+    re.IGNORECASE,
+)
+
+
+def decompose_claim(claim: str) -> list[str]:
+    """Split a compound claim into sub-claims for separate retrieval.
+
+    "Model X achieves 90% on dataset Y while using method Z" →
+        ["Model X achieves 90% on dataset Y", "using method Z"]
+        (caller will reattach the entity prefix for the second sub-claim;
+         this function just produces the segments)
+
+    Pure regex (no LLM call). Returns the original claim as a single-element
+    list when it doesn't decompose, so callers can always iterate over the
+    result without a special case.
+    """
+    if not claim or not claim.strip():
+        return []
+    parts = _COMPOUND_SPLIT_RE.split(claim.strip())
+    parts = [p.strip(" .,;") for p in parts if p and p.strip(" .,;")]
+    if len(parts) <= 1:
+        return [claim.strip()]
+    # Re-attach the head subject to subordinate fragments so each sub-claim
+    # has enough context to retrieve against. Heuristic: take the first 1-3
+    # words of the leading clause as the "subject" and prepend it to
+    # subsequent fragments that start with a lowercase verb.
+    head_words = parts[0].split()
+    subject = " ".join(head_words[:3]) if head_words else ""
+    out = [parts[0]]
+    for p in parts[1:]:
+        if subject and p[0].islower():
+            out.append(f"{subject} {p}")
+        else:
+            out.append(p)
+    return out
+
+
 def _rrf_fuse(
     rank_lists: list[list[int]],
     *,
