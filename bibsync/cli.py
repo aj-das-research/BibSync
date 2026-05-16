@@ -1289,6 +1289,84 @@ def evidence_cmd(
         console.print(f"[dim]JSON written to {output_json}[/dim]")
 
 
+# source-rank -----------------------------------------------------------------
+
+
+@main.command(name="source-rank")
+@click.argument("query")
+@click.option(
+    "--top-papers", "top_papers",
+    type=int, default=5, show_default=True,
+    help="Number of ranked candidates to return.",
+)
+@click.option(
+    "--output-json", "output_json",
+    type=click.Path(path_type=Path), default=None,
+    help="Write a machine-readable JSON report to this path.",
+)
+def source_rank_cmd(
+    query: str,
+    top_papers: int,
+    output_json: Optional[Path],
+) -> None:
+    """Rank candidate papers for a claim or title by canonicality signals.
+
+    Combines citation count + LLM-identified canonicality + venue prior +
+    recency, with a strong negative for survey/review papers. Useful for
+    answering "what's the BEST source to cite for this claim?".
+
+    Example:
+      bibsync source-rank "Vaswani Transformer attention"
+      bibsync source-rank "BERT pre-training"
+    """
+    from . import source_rank as sr_mod
+
+    llm_cfg = cfg.resolve_llm_config()
+    if not llm_cfg:
+        console.print(
+            "[red]No LLM API key configured.[/red] Set one with "
+            "[bold]bibsync config set openrouter_key sk-or-...[/bold]"
+        )
+        sys.exit(2)
+
+    console.print(
+        f"[dim]Ranking sources for:[/dim] [bold]{query!r}[/bold]\n"
+    )
+
+    report = sr_mod.rank_sources_sync(
+        query, top_papers=top_papers, api_key=llm_cfg.api_key,
+    )
+
+    if not report.candidates:
+        console.print("[yellow]No candidate papers found.[/yellow]")
+        return
+
+    t = Table(title="Ranked sources", show_lines=False)
+    t.add_column("#", justify="right"); t.add_column("Title")
+    t.add_column("Author"); t.add_column("Year", justify="right")
+    t.add_column("Venue"); t.add_column("Cited", justify="right")
+    t.add_column("Score", justify="right")
+    t.add_column("Note")
+    for c in report.candidates:
+        note = "[red]survey[/red]" if c.is_survey else ""
+        t.add_row(
+            str(c.rank), c.title[:60], c.first_author[:25],
+            str(c.year or "—"), (c.venue or "—")[:25],
+            str(c.cited_by), f"{c.score:+.2f}", note,
+        )
+    console.print(t)
+    console.print(
+        f"[dim]{report.elapsed_sec:.1f}s. "
+        f"Top match: {report.candidates[0].title!r}[/dim]"
+    )
+
+    if output_json:
+        output_json.write_text(
+            json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+        )
+        console.print(f"[dim]JSON written to {output_json}[/dim]")
+
+
 # memory -----------------------------------------------------------------------
 
 
