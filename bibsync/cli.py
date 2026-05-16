@@ -1415,6 +1415,97 @@ def serve_cmd(host: str, port: int, log_level: str) -> None:
         sys.exit(2)
 
 
+# native-host -----------------------------------------------------------------
+
+
+@main.group(name="native-host")
+def native_host_group() -> None:
+    """Manage the Chrome native-messaging host (for the BibSync extension).
+
+    Chrome extensions can't reliably call ``http://127.0.0.1`` directly
+    (CORS + private-network-access policy). The native messaging host
+    is a small Python script that Chrome launches; it bridges the
+    extension's messages to the local ``bibsync serve`` HTTP API.
+
+    Workflow:
+      1. ``bibsync serve`` (in one terminal)
+      2. ``bibsync native-host install --extension-id <id>``
+      3. Load the BibSync Chrome extension, open Overleaf, click Check.
+
+    The ``--extension-id`` is visible at chrome://extensions with developer
+    mode on. Use ``*`` for unsafe-but-easy local development (allows ANY
+    extension to launch the host).
+    """
+
+
+@native_host_group.command(name="install")
+@click.option(
+    "--extension-id", "extension_id",
+    default="*",
+    help="Chrome extension ID allowed to launch the host. Defaults to '*' "
+    "(any extension — local dev only). For a published extension use the "
+    "32-char ID from chrome://extensions.",
+)
+@click.option(
+    "--python",
+    "python_executable",
+    default=None,
+    help="Path to the python interpreter Chrome should use. Defaults to "
+    "the current interpreter (the one running ``bibsync``).",
+)
+def native_host_install(
+    extension_id: str, python_executable: Optional[str],
+) -> None:
+    """Write the Chrome NativeMessagingHosts manifest for the current user."""
+    from . import native_host_install as nh
+
+    try:
+        p = nh.install(extension_id=extension_id, python_executable=python_executable)
+    except Exception as e:
+        console.print(f"[red]Install failed:[/red] {e}")
+        sys.exit(2)
+    console.print(f"[green]Installed[/green] BibSync native host:")
+    console.print(f"  manifest:  {p}")
+    console.print(f"  wrapper:   {p.parent / (nh.HOST_NAME + ('_launcher.bat' if sys.platform == 'win32' else '_launcher.sh'))}")
+    console.print(f"  host:      {nh.native_host_script_path()}")
+    console.print(f"  allowed:   chrome-extension://{extension_id}/")
+    if sys.platform == "win32":
+        console.print(
+            "\n[yellow]Windows note:[/yellow] You ALSO need a registry entry. "
+            f"Run as the same user:\n"
+            f"  reg add \"HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\{nh.HOST_NAME}\" "
+            f"/ve /t REG_SZ /d \"{p}\" /f"
+        )
+
+
+@native_host_group.command(name="uninstall")
+def native_host_uninstall() -> None:
+    """Remove the native-messaging manifest + launcher wrapper."""
+    from . import native_host_install as nh
+
+    if nh.uninstall():
+        console.print("[green]Removed[/green] BibSync native host manifest + wrapper.")
+    else:
+        console.print("[yellow]Nothing to remove — manifest wasn't installed.[/yellow]")
+
+
+@native_host_group.command(name="status")
+def native_host_status() -> None:
+    """Show whether the native host is installed and where its files live."""
+    from . import native_host_install as nh
+
+    info = nh.status()
+    sym = "[green]installed[/green]" if info["installed"] else "[red]NOT installed[/red]"
+    console.print(f"BibSync native host: {sym}")
+    console.print(f"  manifest:  {info['manifest_path']}")
+    console.print(f"  host:      {info['host_script']}")
+    if info["installed"]:
+        console.print(f"  wrapper:   {info['wrapper']}")
+        console.print(f"  allowed:   {info['allowed_origins']}")
+    else:
+        console.print("\n[dim]Run [bold]bibsync native-host install[/bold] to set up.[/dim]")
+
+
 # memory -----------------------------------------------------------------------
 
 

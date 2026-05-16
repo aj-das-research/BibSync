@@ -1,0 +1,129 @@
+/**
+ * Shared types across the extension contexts.
+ *
+ * These mirror the JSON shapes produced by `bibsync serve`. They are
+ * intentionally hand-written (not generated from OpenAPI) so the extension
+ * has no build-time dependency on a running server — the shapes are stable
+ * because they're the same dataclass `.to_dict()` outputs the CLI uses.
+ */
+
+// ── native-messaging wire protocol ──────────────────────────────────────────
+
+/** Request the service worker sends to the native host. */
+export interface NativeRequest {
+  id: string;
+  method: "GET" | "POST" | "DELETE";
+  path: string;
+  body?: unknown;
+  query?: Record<string, string>;
+}
+
+/** Response the native host returns. */
+export interface NativeResponse {
+  id: string;
+  ok: boolean;
+  status: number;
+  body?: unknown;
+  error?: string;
+}
+
+// ── audit result shapes (mirror bibsync/audit.py AuditReport.to_dict) ───────
+
+export interface EvidenceSpan {
+  type: "supporting" | "contradicting" | "missing" | "neutral";
+  paper_key?: string;
+  paper_title?: string;
+  section?: string;
+  page?: number | null;
+  chunk_idx?: number | null;
+  chunk_score?: number;
+  quote?: string;
+}
+
+export interface CitationCheck {
+  cite_key: string;
+  file: string;
+  line: number;
+  char_offset: number;
+  claim_text: string;
+  status: "verified" | "hallucinated" | "contradicted" | "unverifiable" | "missing_in_bib";
+  issue_type: string;
+  confidence: number;
+  reasoning: string;
+  evidence_tier: number;
+  n_chunks: number;
+  degraded_reason: string;
+  fixed: boolean;
+  paper_source?: string | null;
+  paper_doi?: string | null;
+  paper_arxiv_id?: string | null;
+  contradiction_type?: string;
+  claimed_value?: string;
+  actual_value?: string;
+  evidence?: EvidenceSpan[];
+}
+
+export interface AuditReport {
+  project_root: string;
+  bib_file: string;
+  tex_files_scanned: number;
+  summary: Record<string, number>;
+  checks: CitationCheck[];
+}
+
+// ── evidence command shapes (mirror bibsync/evidence_cmd.py) ────────────────
+
+export interface EvidenceCandidate {
+  paper_key: string;
+  title: string;
+  first_author: string;
+  year: number | null;
+  venue: string;
+  doi: string;
+  arxiv_id: string;
+  cited_by: number;
+  evidence_tier: number;
+  has_abstract: boolean;
+  has_pdf: boolean;
+  spans: EvidenceSpan[];
+  note: string;
+}
+
+export interface EvidenceReport {
+  claim: string;
+  candidates: EvidenceCandidate[];
+  elapsed_sec: number;
+}
+
+// ── connection status ──────────────────────────────────────────────────────
+
+export type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
+
+export interface HealthInfo {
+  ok: boolean;
+  version: string;
+  ts: string;
+}
+
+// ── editor adapter ──────────────────────────────────────────────────────────
+
+export interface EditorSelection {
+  file: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
+// ── settings (persisted in chrome.storage.local) ───────────────────────────
+
+export interface Settings {
+  tier: 0 | 1 | 2;
+  embeddingBackend: "auto" | "local" | "api";
+  ragTopK: number;
+}
+
+export const DEFAULT_SETTINGS: Settings = {
+  tier: 2,
+  embeddingBackend: "auto",
+  ragTopK: 5,
+};

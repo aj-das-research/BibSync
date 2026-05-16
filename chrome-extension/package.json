@@ -1,0 +1,16 @@
+{
+  "name": "bibsync-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "BibSync Chrome/Overleaf citation-assistant extension.",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "watch": "node esbuild.config.mjs --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.270",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>BibSync</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header id="header">
+      <span class="logo">BibSync</span>
+      <span id="conn" class="conn conn-connecting" title="Connection status">
+        <span class="conn-dot"></span>
+        <span id="conn-label">connecting…</span>
+      </span>
+    </header>
+
+    <main id="main">
+      <section id="actions">
+        <button id="btn-check" class="primary">Check selected text</button>
+        <button id="btn-evidence">Find citation for selection</button>
+      </section>
+
+      <section id="status-line" class="status-line"></section>
+
+      <section id="results"></section>
+    </main>
+
+    <footer id="footer">
+      <span class="footer-hint">
+        Select a sentence in Overleaf, then click an action.
+      </span>
+    </footer>
+
+    <script src="index.js"></script>
+  </body>
+</html>

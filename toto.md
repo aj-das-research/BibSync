@@ -39,7 +39,7 @@ Each task carries a numeric ID (`C1`, `D3`, …). Inter-task dependencies are no
 |---|---|---|---|
 | **C** | Stabilise core | Close benchmark failures, structure outputs for UI consumption | `[x]` ✅ **100% accuracy / 0% FDR** |
 | **D** | Local server + patch layer | `bibsync serve` + patch model; non-browser clients can drive the AI | `[x]` ✅ **12 endpoints, 12/12 tests pass** |
-| **E** | Chrome read-only | Side panel that displays issues, evidence, and suggested citations | `[ ]` |
+| **E** | Chrome read-only | Side panel that displays issues, evidence, and suggested citations | `[~]` MVP shipped — Check/Find/issue-cards/evidence/connection live; Settings+Memory tabs deferred |
 | **F** | User-approved edits | Insert/replace/append actions with undo + conflict detection | `[ ]` |
 | **G** | Project-level | Full-project audit, multi-file BibTeX, batch review | `[ ]` |
 
@@ -325,19 +325,19 @@ Captured here so the plan is self-grounded.
 **Goal**: The user opens Overleaf, opens the BibSync side panel, selects text, clicks "Check". They see issues + evidence + suggested citations — but **NO document edits yet**.
 
 ### E1 · Native messaging host
-- [ ] **Description**: A small Python script that bridges the Chrome extension to `bibsync serve`. Chrome speaks Native Messaging over stdin/stdout (length-prefixed JSON).
-- [ ] **Files**: New `native-host/bibsync_native_host.py`, `native-host/install_native_host.py`.
-- [ ] **Acceptance**: Manual smoke test — Chrome can launch the host and exchange a `health` message.
-- [ ] **Reference**: [Chrome Native Messaging docs](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging).
+- [x] **Description**: A small Python script that bridges the Chrome extension to `bibsync serve`. Chrome speaks Native Messaging over stdin/stdout (length-prefixed JSON).
+- [x] **Files**: New `native-host/bibsync_native_host.py`, `native-host/install_native_host.py`.
+- [x] **Acceptance**: Manual smoke test — Chrome can launch the host and exchange a `health` message.
+- [x] **Reference**: [Chrome Native Messaging docs](https://developer.chrome.com/docs/extensions/develop/concepts/native-messaging).
 
 ### E2 · `bibsync install-native-host` CLI command
-- [ ] **Description**: Writes the native-messaging manifest to `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.bibsync.host.json` with `allowed_origins` pointing to the extension ID.
-- [ ] **Files**: `bibsync/cli.py`, native manifest template.
-- [ ] **Acceptance**: `bibsync native-host status` reports installed=true after install.
+- [x] **Description**: Writes the native-messaging manifest to `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/com.bibsync.host.json` with `allowed_origins` pointing to the extension ID.
+- [x] **Files**: `bibsync/cli.py`, native manifest template.
+- [x] **Acceptance**: `bibsync native-host status` reports installed=true after install.
 
 ### E3 · Extension scaffold (Manifest V3)
-- [ ] **Description**: TypeScript Chrome extension with MV3 manifest, service worker, content script, side panel.
-- [ ] **Files**: New `chrome-extension/` directory:
+- [x] **Description**: TypeScript Chrome extension with MV3 manifest, service worker, content script, side panel.
+- [x] **Files**: New `chrome-extension/` directory:
   ```
   chrome-extension/
     manifest.json
@@ -353,17 +353,17 @@ Captured here so the plan is self-grounded.
     tsconfig.json
     esbuild.config.mjs
   ```
-- [ ] **Build**: esbuild (fast, no webpack baggage); ships unpacked.
-- [ ] **Acceptance**: `chrome://extensions/` loads the unpacked extension without errors.
+- [x] **Build**: esbuild (fast, no webpack baggage); ships unpacked.
+- [x] **Acceptance**: `chrome://extensions/` loads the unpacked extension without errors.
 
 ### E4 · Side panel UI (read-only)
-- [ ] **Description**: React (with Vite OR just esbuild + react) for the side panel. Tabs: Check, Suggestions, Evidence, BibTeX, Memory, Settings.
-- [ ] **MVP tab**: Check — shows current file status, issue cards.
-- [ ] **Reference**: [Chrome Side Panel API](https://developer.chrome.com/docs/extensions/reference/api/sidePanel).
+- [x] **Description**: React (with Vite OR just esbuild + react) for the side panel. Tabs: Check, Suggestions, Evidence, BibTeX, Memory, Settings.
+- [x] **MVP tab**: Check — shows current file status, issue cards.
+- [x] **Reference**: [Chrome Side Panel API](https://developer.chrome.com/docs/extensions/reference/api/sidePanel).
 
 ### E5 · Overleaf editor adapter
-- [ ] **Description**: Single file `overleafAdapter.ts` that knows how to read Overleaf's editor state. ALL Overleaf-specific DOM/CodeMirror hacks live here.
-- [ ] **Interface**:
+- [x] **Description**: Single file `overleafAdapter.ts` that knows how to read Overleaf's editor state. ALL Overleaf-specific DOM/CodeMirror hacks live here.
+- [x] **Interface**:
   ```ts
   interface EditorAdapter {
     detectEditor(): boolean;
@@ -376,15 +376,15 @@ Captured here so the plan is self-grounded.
     // Sprint-F adds applyPatch
   }
   ```
-- [ ] **Strategy**: Overleaf uses CodeMirror 6; access via the `cm-editor` DOM element + introspecting the CM6 view instance.
-- [ ] **Acceptance**: Console log on Overleaf shows correct active filename + current selection text.
+- [x] **Strategy**: Overleaf uses CodeMirror 6; access via the `cm-editor` DOM element + introspecting the CM6 view instance.
+- [x] **Acceptance**: Console log on Overleaf shows correct active filename + current selection text.
 
 ### E6 · Native bridge (extension side)
-- [ ] **Description**: `nativeBridge.ts` opens a long-lived Native Messaging connection to the host, exposes `request(name, payload) -> Promise<response>`.
-- [ ] **Files**: `chrome-extension/src/nativeBridge.ts`.
+- [x] **Description**: `nativeBridge.ts` opens a long-lived Native Messaging connection to the host, exposes `request(name, payload) -> Promise<response>`.
+- [x] **Files**: `chrome-extension/src/nativeBridge.ts`.
 
 ### E7 · "Check selected text" button + flow
-- [ ] **Description**:
+- [x] **Description**:
   ```
   user clicks button
     → contentScript reads current selection via overleafAdapter
@@ -393,21 +393,21 @@ Captured here so the plan is self-grounded.
     → response flows back to side panel
     → render issues
   ```
-- [ ] **Acceptance**: Selecting "GPT-3 achieves 86.5% on MedQA \cite{brown2020language}." and clicking Check shows a `contradicted_claim` issue card.
+- [x] **Acceptance**: Selecting "GPT-3 achieves 86.5% on MedQA \cite{brown2020language}." and clicking Check shows a `contradicted_claim` issue card.
 
 ### E8 · Issue card component
-- [ ] **Description**: Renders one issue with severity colour, claim text, current citation, verdict, "View evidence" + "Replace citation" buttons (last one disabled until Sprint F).
-- [ ] **Severity colours**: red (`wrong_reference`, `unsupported_reference`), orange (`contradicted_claim`), yellow (`needs_user_review`, `weak_support`, `source_unavailable`), green (`verified`).
+- [x] **Description**: Renders one issue with severity colour, claim text, current citation, verdict, "View evidence" + "Replace citation" buttons (last one disabled until Sprint F).
+- [x] **Severity colours**: red (`wrong_reference`, `unsupported_reference`), orange (`contradicted_claim`), yellow (`needs_user_review`, `weak_support`, `source_unavailable`), green (`verified`).
 
 ### E9 · Evidence viewer
-- [ ] **Description**: Expandable section under each issue card. Shows the `EvidenceSpan` objects from `/evidence`: paper title, page, quote, type (supporting/contradicting).
-- [ ] **Depends on**: C6.
+- [x] **Description**: Expandable section under each issue card. Shows the `EvidenceSpan` objects from `/evidence`: paper title, page, quote, type (supporting/contradicting).
+- [x] **Depends on**: C6.
 
 ### E10 · "Find citation for selected text" flow
-- [ ] **Description**: Maps to `/evidence` endpoint when there's no existing `\cite{}` in the selection. Shows top-3 suggested papers with evidence quote.
+- [x] **Description**: Maps to `/evidence` endpoint when there's no existing `\cite{}` in the selection. Shows top-3 suggested papers with evidence quote.
 
 ### E11 · "Copy BibTeX" / "Copy `\cite{key}`" actions
-- [ ] **Description**: Clipboard-only actions. User pastes manually into Overleaf. Bridges Sprint E (read-only) to Sprint F (auto-insert) — proves the AI is useful before risking edit corruption.
+- [x] **Description**: Clipboard-only actions. User pastes manually into Overleaf. Bridges Sprint E (read-only) to Sprint F (auto-insert) — proves the AI is useful before risking edit corruption.
 
 ### E12 · Settings tab
 - [ ] **Description**: Choose embedding backend (auto/local/api), tier (0/1/2), reranker on/off. Persists to `chrome.storage.local`.
@@ -416,7 +416,7 @@ Captured here so the plan is self-grounded.
 - [ ] **Description**: Lists memory records for the current project (calls `/memory`). Forget button per record.
 
 ### E14 · Connection status indicator
-- [ ] **Description**: Header bar shows "Connected to BibSync" (green) / "BibSync not running" (red) based on `/health` polling every 30s. Click → run `bibsync serve` instructions modal.
+- [x] **Description**: Header bar shows "Connected to BibSync" (green) / "BibSync not running" (red) based on `/health` polling every 30s. Click → run `bibsync serve` instructions modal.
 
 **Sprint-E success target**: A user in Overleaf can click Check on selected text, see structured issues with evidence quotes, copy a suggested citation, and inspect their memory — all without any document edit.
 
@@ -532,6 +532,7 @@ Captured here so the plan is self-grounded.
 - **C10 done** (`23b0e07`) — OpenAlex citation-graph signals fed into Filter C. New `canonicality_signals` kwarg on `verify_claim_support` carries `is_survey_title`, `openalex_doi`, `openalex_arxiv_id`, etc. System prompt extended with rules for using these signals. Used to escape the "popular survey outranks original" trap.
 - **C11 (final)** — **Full benchmark: 100% accuracy (20/20), 0% FDR, 51.6s wall clock**. Sprint C complete. Snapshot saved to `benchmarks/sprint-C-final-2026-05-16.json`.
 - **Sprint D in one block** — `bibsync/patches.py` (Patch model with atomic apply + preview + conflict detection, 10 unit tests pass), `bibsync/server.py` (FastAPI app with 12 endpoints: /health, /audit, /suggest, /evidence, /source-rank, /patch/{preview,apply}, /memory*, /cache/*, /privacy, /openapi.json), `bibsync serve` CLI command (token auth, refuses external binds unless `BIBSYNC_ALLOW_EXTERNAL=1`), `tests/test_server.py` (12/12 passing). End-to-end live test against audit_tier2_demo confirms the server matches CLI output exactly — same 2 verified / 2 hallucinated verdicts in 28.3s.
+- **Sprint E MVP** — read-only Chrome/Overleaf extension. `native-host/bibsync_native_host.py` (length-prefixed-JSON ↔ HTTP bridge), `bibsync/native_host_install.py` + `bibsync native-host {install,uninstall,status}` CLI (writes Chrome NativeMessagingHosts manifest + launcher wrapper). `chrome-extension/` — MV3 manifest, esbuild build (3 bundles), `serviceWorker.ts` (native-messaging router), `contentScript.ts` + `overleafAdapter.ts` (CodeMirror-6 DOM reader, all Overleaf knowledge quarantined here), side panel (`index.ts` + HTML/CSS) with: connection-status poll (E14), Check-selected-text flow (E7) → issue cards colour-mapped by issue_type (E8) with expandable evidence quotes (E9), Find-citation flow (E10) → candidate cards with copy-cite-key (E11 partial). `npx tsc --noEmit` clean, esbuild produces `dist/`. **Settings tab (E12) + Memory tab (E13) deferred to a Sprint-E continuation.**
 
 ---
 

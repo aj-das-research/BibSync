@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "BibSync — Citation Assistant",
+  "version": "0.1.0",
+  "description": "Verify citations against paper content, detect hallucinated references, and suggest sources — directly in Overleaf.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "nativeMessaging",
+    "sidePanel",
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.overleaf.com/*",
+    "https://*.overleaf.com/*"
+  ],
+  "background": {
+    "service_worker": "serviceWorker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidePanel/index.html"
+  },
+  "action": {
+    "default_title": "Open BibSync side panel"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.overleaf.com/*", "https://*.overleaf.com/*"],
+      "js": ["contentScript.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
