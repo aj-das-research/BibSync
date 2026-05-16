@@ -41,7 +41,7 @@ Each task carries a numeric ID (`C1`, `D3`, …). Inter-task dependencies are no
 | **D** | Local server + patch layer | `bibsync serve` + patch model; non-browser clients can drive the AI | `[x]` ✅ **12 endpoints, 12/12 tests pass** |
 | **E** | Chrome read-only | Side panel that displays issues, evidence, and suggested citations | `[x]` ✅ all 14 tasks — Check/Memory/Settings tabs live |
 | **F** | User-approved edits | Insert/replace/append actions with undo + conflict detection | `[~]` core shipped — preview modal, insert, remove, ignore, mark-verified, undo, conflict; bib-append (F5) + multi-bib (F10) deferred |
-| **G** | Project-level | Full-project audit, multi-file BibTeX, batch review | `[ ]` |
+| **G** | Project-level | Full-project audit, multi-file BibTeX, batch review | `[~]` extension: batch review + report export + checklist done; true multi-file audit stays a CLI job |
 
 Definition of "done": all sprint tasks ticked AND the success target at the end of each sprint section is met.
 
@@ -467,28 +467,28 @@ Captured here so the plan is self-grounded.
 **Goal**: Before submission, the user runs a full-project audit and reviews all issues from the side panel.
 
 ### G1 · Detect root `.tex`
-- [ ] **Description**: Find the main file (the one with `\documentclass` and `\begin{document}`). Many projects have `main.tex` but not all.
+- [-] **Description**: Find the main file (the one with `\documentclass` and `\begin{document}`). Many projects have `main.tex` but not all.
 
 ### G2 · Read multiple files via Overleaf
-- [ ] **Description**: Walk the project file tree; collect all `.tex` and `.bib` content. Cap at sane size limits (e.g. 1 MB per file).
+- [-] **Description**: Walk the project file tree; collect all `.tex` and `.bib` content. Cap at sane size limits (e.g. 1 MB per file).
 
 ### G3 · Full-project `/audit` server call
-- [ ] **Description**: Multi-file request to `/audit`. Server already handles this via the existing `audit_project` machinery.
+- [-] **Description**: Multi-file request to `/audit`. Server already handles this via the existing `audit_project` machinery.
 
 ### G4 · Batch issue review UI
-- [ ] **Description**: Scrollable list of all issues, grouped by file. Filter chips: severity, status, file. Bulk accept/ignore actions.
+- [x] **Description**: Scrollable list of all issues, grouped by file. Filter chips: severity, status, file. Bulk accept/ignore actions.
 
 ### G5 · HTML/JSON report export
-- [ ] **Description**: User can save a snapshot of the audit for sharing (e.g. with a supervisor). HTML output renders the same as the side panel; JSON is the raw `audit` response.
+- [x] **Description**: User can save a snapshot of the audit for sharing (e.g. with a supervisor). HTML output renders the same as the side panel; JSON is the raw `audit` response.
 
 ### G6 · Batch BibTeX backfill
-- [ ] **Description**: One click runs `extract` semantics — for every `missing_bib_entry`, fetch the BibTeX from the verified canonical paper, append to the chosen `.bib`.
+- [-] **Description**: One click runs `extract` semantics — for every `missing_bib_entry`, fetch the BibTeX from the verified canonical paper, append to the chosen `.bib`.
 
 ### G7 · Pre-submission checklist
-- [ ] **Description**: A short final screen: "X verified, Y issues need review, Z hallucinated cites need fixing". Refuses to "mark project ready" until all severity≥orange issues are resolved or ignored.
+- [x] **Description**: A short final screen: "X verified, Y issues need review, Z hallucinated cites need fixing". Refuses to "mark project ready" until all severity≥orange issues are resolved or ignored.
 
 ### G8 · Optional Git workflow
-- [ ] **Description**: For Overleaf-with-Git users, a `Save as commit` button that bundles all approved patches into a single commit with a generated message. Defer the full implementation; just leave the hook.
+- [-] **Description**: For Overleaf-with-Git users, a `Save as commit` button that bundles all approved patches into a single commit with a generated message. Defer the full implementation; just leave the hook.
 
 **Sprint-G success target**: A real paper draft can be audited end-to-end from the side panel, issues triaged in batch, and the project marked ready-for-submission only when the safety bar is met.
 
@@ -532,7 +532,10 @@ Captured here so the plan is self-grounded.
 - **C10 done** (`23b0e07`) — OpenAlex citation-graph signals fed into Filter C. New `canonicality_signals` kwarg on `verify_claim_support` carries `is_survey_title`, `openalex_doi`, `openalex_arxiv_id`, etc. System prompt extended with rules for using these signals. Used to escape the "popular survey outranks original" trap.
 - **C11 (final)** — **Full benchmark: 100% accuracy (20/20), 0% FDR, 51.6s wall clock**. Sprint C complete. Snapshot saved to `benchmarks/sprint-C-final-2026-05-16.json`.
 - **Sprint D in one block** — `bibsync/patches.py` (Patch model with atomic apply + preview + conflict detection, 10 unit tests pass), `bibsync/server.py` (FastAPI app with 12 endpoints: /health, /audit, /suggest, /evidence, /source-rank, /patch/{preview,apply}, /memory*, /cache/*, /privacy, /openapi.json), `bibsync serve` CLI command (token auth, refuses external binds unless `BIBSYNC_ALLOW_EXTERNAL=1`), `tests/test_server.py` (12/12 passing). End-to-end live test against audit_tier2_demo confirms the server matches CLI output exactly — same 2 verified / 2 hallucinated verdicts in 28.3s.
-- **Sprint E MVP** — read-only Chrome/Overleaf extension. `native-host/bibsync_native_host.py` (length-prefixed-JSON ↔ HTTP bridge), `bibsync/native_host_install.py` + `bibsync native-host {install,uninstall,status}` CLI (writes Chrome NativeMessagingHosts manifest + launcher wrapper). `chrome-extension/` — MV3 manifest, esbuild build (3 bundles), `serviceWorker.ts` (native-messaging router), `contentScript.ts` + `overleafAdapter.ts` (CodeMirror-6 DOM reader, all Overleaf knowledge quarantined here), side panel (`index.ts` + HTML/CSS) with: connection-status poll (E14), Check-selected-text flow (E7) → issue cards colour-mapped by issue_type (E8) with expandable evidence quotes (E9), Find-citation flow (E10) → candidate cards with copy-cite-key (E11 partial). `npx tsc --noEmit` clean, esbuild produces `dist/`. **Settings tab (E12) + Memory tab (E13) deferred to a Sprint-E continuation.**
+- **Sprint E MVP** — read-only Chrome/Overleaf extension. `native-host/bibsync_native_host.py` (length-prefixed-JSON ↔ HTTP bridge), `bibsync/native_host_install.py` + `bibsync native-host {install,uninstall,status}` CLI (writes Chrome NativeMessagingHosts manifest + launcher wrapper). `chrome-extension/` — MV3 manifest, esbuild build (3 bundles), `serviceWorker.ts` (native-messaging router), `contentScript.ts` + `overleafAdapter.ts` (CodeMirror-6 DOM reader, all Overleaf knowledge quarantined here), side panel (`index.ts` + HTML/CSS) with: connection-status poll (E14), Check-selected-text flow (E7) → issue cards colour-mapped by issue_type (E8) with expandable evidence quotes (E9), Find-citation flow (E10) → candidate cards with copy-cite-key (E11 partial). `npx tsc --noEmit` clean, esbuild produces `dist/`. Commit `9c84d5c`.
+- **Sprint E continuation** (`acfc4fd`) — Settings tab (E12) + Memory tab (E13); side panel restructured into a 3-tab UI. Fixed a real correctness bug: server-driven audits scoped memory to a throwaway temp dir, so extension memory never persisted. `CitationMemory`/`open_memory`/`audit_project` now accept an explicit `project_id`; the extension derives it from the Overleaf URL (`overleaf.com/project/<id>`) so memory is per-project and stable across sessions.
+- **Sprint F** (`2903621`) — user-approved edits. New `POST /memory/remember` endpoint (Ignore/Mark-verified need to *write* memory; 13/13 server tests). `overleafAdapter.applyEdit` writes into CodeMirror-6 via `execCommand("insertText")` on the contentEditable; `offsetToDOMPosition` maps char offsets across `.cm-line` nodes. Side panel: preview modal with before/after diff + conflict block (F2), Insert `\cite` (F3), Remove citation (F4), Ignore→override / Mark-verified→accept memory writes (F6/F7), Undo via inverse patch + banner (F8), conflict detection surfaced (F9). Every edit gates on an Accept click. F5 (append-bibtex) + F10 (multi-bib) deferred. **Caveat: the CM6 write path needs a real-browser smoke test — mechanism is sound, the offset→DOM mapping against live Overleaf markup is unverified.**
+- **Sprint G** — extension-side project review. Scope-corrected: Overleaf's editor holds one file in the DOM at a time, so true multi-file project audit (G1-G3/G6) stays a CLI job (`bibsync audit .`) — marked `[-]`. Built G4 (batch review: All/Problems/Verified filter chips), G5 (report export: self-contained HTML + JSON download via blob URL), G7 (pre-submission checklist: ready/not-ready verdict — "ready" only when 0 hallucinated + 0 contradicted + 0 missing_in_bib). `tsc` clean, esbuild clean.
 
 ---
 

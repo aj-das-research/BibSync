@@ -477,8 +477,75 @@ async function runCheck(): Promise<void> {
   }
 }
 
+/** Active batch-review filter (G4). */
+let currentFilter: "all" | "problems" | "verified" = "all";
+
+const STATUS_ORDER = [
+  "hallucinated", "contradicted", "missing_in_bib", "unverifiable", "verified",
+];
+
+function isProblem(c: CitationCheck): boolean {
+  return c.status !== "verified";
+}
+
+/**
+ * Pre-submission checklist (G7). Computes a ready / not-ready verdict:
+ * a project is "ready" only when nothing is hallucinated or contradicted
+ * and nothing is still missing from the .bib. Unverifiable is allowed
+ * (the user may have judged those manually) but surfaced.
+ */
+function checklistHtml(checks: CitationCheck[]): string {
+  const count = (s: string) => checks.filter((c) => c.status === s).length;
+  const verified = count("verified");
+  const hallucinated = count("hallucinated");
+  const contradicted = count("contradicted");
+  const missing = count("missing_in_bib");
+  const unverifiable = count("unverifiable");
+  const blockers = hallucinated + contradicted + missing;
+  const ready = blockers === 0;
+
+  const verdict = ready
+    ? `<div class="checklist-verdict ready">✓ Citations look ready${
+        unverifiable ? ` — ${unverifiable} unverifiable, review optional` : ""
+      }</div>`
+    : `<div class="checklist-verdict not-ready">✗ ${blockers} blocking issue(s) — not ready</div>`;
+
+  const row = (label: string, n: number, cls: string) =>
+    n > 0
+      ? `<span class="cl-stat ${cls}">${n} ${label}</span>`
+      : "";
+
+  return `<div class="checklist">
+    ${verdict}
+    <div class="cl-stats">
+      ${row("verified", verified, "cl-green")}
+      ${row("hallucinated", hallucinated, "cl-red")}
+      ${row("contradicted", contradicted, "cl-orange")}
+      ${row("missing in bib", missing, "cl-red")}
+      ${row("unverifiable", unverifiable, "cl-yellow")}
+    </div>
+    <button id="btn-export" class="export-btn">Export report</button>
+  </div>`;
+}
+
+/** Filter chip bar (G4). */
+function filterBarHtml(checks: CitationCheck[]): string {
+  const nAll = checks.length;
+  const nProb = checks.filter(isProblem).length;
+  const nVer = nAll - nProb;
+  const chip = (key: string, label: string, n: number) =>
+    `<button class="chip ${currentFilter === key ? "chip-active" : ""}" ` +
+    `data-filter="${key}">${label} (${n})</button>`;
+  return `<div class="filter-bar">
+    ${chip("all", "All", nAll)}
+    ${chip("problems", "Problems", nProb)}
+    ${chip("verified", "Verified", nVer)}
+  </div>`;
+}
+
 function renderAudit(checks: CitationCheck[], summary: Record<string, number>): void {
   currentChecks = checks;
+  currentFilter = "all";
   if (checks.length === 0) {
     setStatus("");
     emptyState("No \\cite{} calls found in this file.");
@@ -488,12 +555,107 @@ function renderAudit(checks: CitationCheck[], summary: Record<string, number>): 
     .map(([k, v]) => `${v} ${k}`)
     .join(", ");
   setStatus(`${checks.length} citation(s): ${parts}`);
-  const order = ["hallucinated", "contradicted", "missing_in_bib", "unverifiable", "verified"];
-  // currentChecks index must survive the sort, so render from a sorted COPY
-  // that carries the original index.
-  const indexed = checks.map((c, i) => ({ c, i }));
-  indexed.sort((a, b) => order.indexOf(a.c.status) - order.indexOf(b.c.status));
-  results.innerHTML = indexed.map(({ c, i }) => issueCardHtml(c, i)).join("");
+  results.innerHTML =
+    checklistHtml(checks) +
+    filterBarHtml(checks) +
+    `<div id="issue-cards"></div>`;
+  renderCards();
+}
+
+/** Render the issue cards for the active filter (G4). */
+function renderCards(): void {
+  const host = document.getElementById("issue-cards");
+  if (!host) return;
+  // Keep original indices stable for the action buttons.
+  const indexed = currentChecks.map((c, i) => ({ c, i }));
+  indexed.sort(
+    (a, b) =>
+      STATUS_ORDER.indexOf(a.c.status) - STATUS_ORDER.indexOf(b.c.status),
+  );
+  const visible = indexed.filter(({ c }) => {
+    if (currentFilter === "problems") return isProblem(c);
+    if (currentFilter === "verified") return c.status === "verified";
+    return true;
+  });
+  host.innerHTML = visible.length
+    ? visible.map(({ c, i }) => issueCardHtml(c, i)).join("")
+    : `<div class="empty">No citations in this filter.</div>`;
+}
+
+// ── report export (G5) ──────────────────────────────────────────────────────
+
+/** Build a self-contained HTML report from the current audit. */
+function buildHtmlReport(checks: CitationCheck[], file: string): string {
+  const ts = new Date().toISOString();
+  const rows = checks
+    .map((c) => {
+      const colour =
+        c.status === "verified"
+          ? "#16a34a"
+          : c.status === "contradicted"
+            ? "#ea580c"
+            : c.status === "unverifiable"
+              ? "#ca8a04"
+              : "#dc2626";
+      return `<tr>
+        <td><code>\\cite{${escHtml(c.cite_key)}}</code></td>
+        <td style="color:${colour};font-weight:600">${escHtml(c.status)}</td>
+        <td>${escHtml(c.issue_type || "")}</td>
+        <td>${escHtml(c.claim_text)}</td>
+        <td>${escHtml(c.reasoning)}</td>
+      </tr>`;
+    })
+    .join("\n");
+  return `<!doctype html>
+<html><head><meta charset="utf-8"><title>BibSync audit — ${escHtml(file)}</title>
+<style>
+  body{font-family:-apple-system,Segoe UI,sans-serif;margin:32px;color:#1c1c1e}
+  h1{font-size:18px} .meta{color:#6b6b70;font-size:13px;margin-bottom:18px}
+  table{border-collapse:collapse;width:100%;font-size:13px}
+  th,td{border:1px solid #e3e3e6;padding:6px 8px;text-align:left;vertical-align:top}
+  th{background:#f7f7f8} code{font-family:ui-monospace,Menlo,monospace}
+</style></head><body>
+<h1>BibSync citation audit</h1>
+<div class="meta">File: ${escHtml(file)} · ${checks.length} citation(s) · generated ${ts}</div>
+<table><thead><tr>
+  <th>Citation</th><th>Status</th><th>Issue type</th><th>Claim</th><th>Reasoning</th>
+</tr></thead><tbody>
+${rows}
+</tbody></table>
+</body></html>`;
+}
+
+function escHtml(s: string): string {
+  return (s ?? "").replace(/[&<>"]/g, (ch) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[ch] ?? ch,
+  );
+}
+
+/** Trigger a browser download of `content` as `filename`. */
+function downloadFile(filename: string, content: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportReport(): void {
+  if (currentChecks.length === 0) return;
+  const file = currentDoc?.file ?? "audit";
+  const stamp = new Date().toISOString().slice(0, 10);
+  // Offer both: HTML for humans, JSON for tools. Default to HTML.
+  const html = buildHtmlReport(currentChecks, file);
+  downloadFile(`bibsync-audit-${stamp}.html`, html, "text/html");
+  const json = JSON.stringify(
+    { file, generated: new Date().toISOString(), checks: currentChecks },
+    null,
+    2,
+  );
+  downloadFile(`bibsync-audit-${stamp}.json`, json, "application/json");
+  setStatus("Report exported (HTML + JSON).");
 }
 
 // ── Find-citation flow (E10) ────────────────────────────────────────────────
@@ -689,6 +851,26 @@ for (const id of ["set-tier", "set-backend", "set-topk"]) {
 
 results.addEventListener("click", (e) => {
   const t = e.target as HTMLElement;
+  // G4 — filter chips.
+  const filter = t.getAttribute("data-filter");
+  if (filter) {
+    currentFilter = filter as typeof currentFilter;
+    document
+      .querySelectorAll(".chip")
+      .forEach((c) =>
+        c.classList.toggle(
+          "chip-active",
+          c.getAttribute("data-filter") === filter,
+        ),
+      );
+    renderCards();
+    return;
+  }
+  // G5 — export button.
+  if (t.id === "btn-export") {
+    exportReport();
+    return;
+  }
   if (t.matches("[data-toggle]")) {
     const card = t.closest("[data-card]");
     const panel = card?.querySelector<HTMLElement>(".evidence-collapsed");

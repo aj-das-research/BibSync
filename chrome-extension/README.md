@@ -126,12 +126,34 @@ the manuscript without an explicit Accept click. If the file changed
 since the issue was computed, the modal shows a conflict warning and
 disables Accept (re-run Check first).
 
-## What's NOT in this build (Sprint G)
+## Project review (Sprint G)
+
+After a Check, the panel shows:
+
+- **Pre-submission checklist** — a ready / not-ready verdict.
+  "Ready" only when nothing is hallucinated, contradicted, or missing
+  from the `.bib`.
+- **Filter chips** — All / Problems / Verified, to triage many
+  citations quickly.
+- **Export report** — downloads a self-contained HTML report (shareable
+  with a supervisor) plus a JSON report (for tooling / CI).
+
+## Multi-file projects
+
+The extension audits **the file currently open in the Overleaf editor**
+— Overleaf only keeps one file's content in the page at a time. To
+audit an entire multi-file project, use the CLI:
+
+```bash
+bibsync audit /path/to/project --tier 2
+```
+
+## What's NOT in this build
 
 - Append-BibTeX-entry edits (the `\cite` insert places the marker;
-  the bib entry must be copied in manually for now).
+  the bib entry is copied in manually for now).
 - Multi-`.bib`-file target selection.
-- Full-project audit + batch review.
+- Browser-side whole-project audit (use the CLI — see above).
 
 ## Development
 

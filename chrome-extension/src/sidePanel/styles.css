@@ -365,3 +365,61 @@ button.primary {
   gap: 8px;
   margin-top: 10px;
 }
+
+/* ── pre-submission checklist (G7) ──────────────────── */
+.checklist {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 10px;
+  background: var(--panel);
+}
+.checklist-verdict {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 6px;
+}
+.checklist-verdict.ready { color: var(--green); }
+.checklist-verdict.not-ready { color: var(--red); }
+.cl-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.cl-stat {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.cl-stat.cl-green  { color: var(--green); }
+.cl-stat.cl-red    { color: var(--red); }
+.cl-stat.cl-orange { color: var(--orange); }
+.cl-stat.cl-yellow { color: var(--yellow); }
+.export-btn {
+  width: 100%;
+  font-size: 11px;
+  padding: 5px 8px;
+}
+
+/* ── filter chips (G4) ──────────────────────────────── */
+.filter-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.chip {
+  flex: 1;
+  font-size: 11px;
+  padding: 4px 6px;
+  border-radius: 12px;
+  background: var(--panel);
+}
+.chip-active {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: var(--accent);
+  font-weight: 600;
+}
