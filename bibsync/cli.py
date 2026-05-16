@@ -796,6 +796,15 @@ def verify_cmd(bib_path: Path, headless: bool, delay: float) -> None:
     "every reasoning string) to this path. Lets external tools (CI, editors, "
     "dashboards) consume the audit without screen-scraping.",
 )
+@click.option(
+    "--no-memory",
+    is_flag=True,
+    default=False,
+    help="Disable cross-run memory recall for this run. Each citation will "
+    "be re-judged by the LLM even if a previous run already produced a "
+    "verdict for it. Useful when iterating on the audit prompt itself or "
+    "when you suspect a stored verdict is stale.",
+)
 def audit_cmd(
     project_root: Path,
     bib_path: Path,
@@ -811,6 +820,7 @@ def audit_cmd(
     confidence_floor: float,
     delay: float,
     output_json: Optional[Path],
+    no_memory: bool,
 ) -> None:
     """Audit every \\cite{} in PROJECT_ROOT — verify each cited paper actually
     supports the claim it's attached to.
@@ -863,6 +873,7 @@ def audit_cmd(
         embedding_model=embedding_model,
         embedding_backend=embedding_backend,
         per_dir_bib=per_dir_bib,
+        use_memory=not no_memory,
     )
 
     if not report.checks:

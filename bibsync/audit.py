@@ -342,6 +342,7 @@ async def audit_project(
     embedding_backend: str = "auto",
     ss_api_key: Optional[str] = None,
     per_dir_bib: bool = False,
+    use_memory: bool = True,
 ) -> AuditReport:
     """Audit every ``\\cite{}`` in ``project_root`` against the ``bib_file``.
 
@@ -427,6 +428,21 @@ async def audit_project(
         cache_dir = Path(user_cache_dir("bibsync", "bibsync"))
     cache_dir = Path(cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Memory — per-project decision recall. Enabled by default; --no-memory
+    # makes it inert without changing the call shape. Reads short-circuit
+    # LLM calls when we've previously judged the same (claim, paper) pair
+    # at the same-or-higher tier. Writes capture each new verdict so the
+    # next run can recall.
+    from . import memory as memory_mod
+    mem = memory_mod.open_memory(
+        project_root=project_root, enabled=use_memory, cache_dir=cache_dir,
+    )
+    dbg.trace(
+        "audit.memory",
+        "enabled" if use_memory else "disabled",
+        project_id=mem.project_id,
+    )
 
     paper_cache = None
     if tier >= 1:
@@ -592,29 +608,85 @@ async def audit_project(
             # Only overwrite if Tier 2 actually had a reason — keep tier-1 reason otherwise.
             check.degraded_reason = tier2_failure_reason
 
-        # Step 4 — LLM audit (verdict cached by (cite_key, claim) pair).
+        # Step 4 — Memory recall + LLM audit.
+        #
+        # Three-tier short-circuit (cheapest first):
+        #   a. In-run verdict_cache keyed by (cite_key, claim_text) — already
+        #      judged in THIS run. O(1) lookup, no I/O.
+        #   b. CROSS-RUN memory recall keyed by (claim_text, paper_key) — judged
+        #      in a previous run at the same-or-higher tier. Reads JSONL.
+        #   c. LLM call to llm.audit_citation.
         cache_key = (check.cite_key, check.claim_text)
-        if cache_key in verdict_cache and not retrieved_chunk_texts:
-            # Tier 2 cache by (key, claim) is correct: same claim ⇒ same retrieved
-            # chunks ⇒ same verdict. But we re-run if tier-2 to surface trace.
-            verdict = verdict_cache[cache_key]
-            dbg.trace("audit.check", "cache hit", key=check.cite_key)
+        memory_hit: Optional[llm.CitationAudit] = None
+        # Identify the paper for cross-run memory keying. Prefer the
+        # PaperContent stable_key (arxiv → doi → title-hash) when we have
+        # it; fall back to a doi/arxiv from the bib entry; finally the
+        # cite_key (project-local, less stable but better than nothing).
+        paper_key_for_mem = ""
+        if content is not None:
+            paper_key_for_mem = content.stable_key()
+        elif entry.get("doi"):
+            paper_key_for_mem = "doi-" + entry["doi"].replace("/", "_")
+        elif entry.get("eprint") or entry.get("arxiv"):
+            paper_key_for_mem = "arxiv-" + (entry.get("eprint") or entry["arxiv"])
         else:
-            verdict = llm.audit_citation(
-                claim_text=check.claim_text,
-                cited_paper_title=title,
-                cited_paper_authors=authors,
-                cited_paper_year=year,
-                cited_paper_venue=venue,
-                abstract=abstract,
-                retrieved_chunks=retrieved_chunk_texts,
-                model=model,
-                api_key=api_key,
+            paper_key_for_mem = "cite-" + check.cite_key
+
+        if cache_key in verdict_cache and not retrieved_chunk_texts:
+            verdict = verdict_cache[cache_key]
+            dbg.trace("audit.check", "in-run cache hit", key=check.cite_key)
+        else:
+            # Memory recall — only at the SAME-or-higher achieved tier so we
+            # don't carry a tier-0 verdict into a tier-2 request that has
+            # better evidence available.
+            recalls = mem.recall(
+                check.claim_text,
+                paper_key=paper_key_for_mem,
+                types=["verdict", "override"],
             )
+            best_recall = None
+            for r in recalls:
+                if r.tier >= check.evidence_tier:
+                    best_recall = r
+                    break
+            if best_recall is not None:
+                # Reconstruct a CitationAudit shape from the stored decision.
+                supports = best_recall.decision == "verified"
+                contradicted = best_recall.decision == "contradicted"
+                memory_hit = llm.CitationAudit(
+                    supports=supports,
+                    confidence=best_recall.confidence,
+                    reasoning=(
+                        f"[memory] {best_recall.rationale} "
+                        f"(from {best_recall.ts}, tier={best_recall.tier})"
+                    ),
+                    contradicted=contradicted,
+                )
+                verdict = memory_hit
+                dbg.trace(
+                    "audit.memory",
+                    "RECALL — skipped LLM call",
+                    key=check.cite_key,
+                    paper_key=paper_key_for_mem,
+                    decision=best_recall.decision,
+                    age=best_recall.ts,
+                )
+            else:
+                verdict = llm.audit_citation(
+                    claim_text=check.claim_text,
+                    cited_paper_title=title,
+                    cited_paper_authors=authors,
+                    cited_paper_year=year,
+                    cited_paper_venue=venue,
+                    abstract=abstract,
+                    retrieved_chunks=retrieved_chunk_texts,
+                    model=model,
+                    api_key=api_key,
+                )
+                if check.cite_key not in paced_keys and delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
+                paced_keys.add(check.cite_key)
             verdict_cache[cache_key] = verdict
-            if check.cite_key not in paced_keys and delay_seconds > 0:
-                await asyncio.sleep(delay_seconds)
-            paced_keys.add(check.cite_key)
 
         check.confidence = verdict.confidence
         check.reasoning = verdict.reasoning
@@ -664,6 +736,27 @@ async def audit_project(
             conf=round(check.confidence, 2),
             line=check.line,
         )
+
+        # Persist this verdict to memory — but only when we actually ran the
+        # LLM (not when the verdict came from memory itself). Skip
+        # missing_in_bib because there's no paper to key on.
+        if (
+            memory_hit is None
+            and check.status != "missing_in_bib"
+            and paper_key_for_mem
+        ):
+            mem.remember(
+                type_="verdict",
+                claim_text=check.claim_text,
+                paper_key=paper_key_for_mem,
+                cite_key=check.cite_key,
+                decision=check.status,
+                tier=check.evidence_tier,
+                confidence=check.confidence,
+                source="audit",
+                rationale=check.reasoning,
+                scope="project",
+            )
 
     # Step 5 — Optional --fix: replace hallucinated cite calls with marker comments.
     if fix:
