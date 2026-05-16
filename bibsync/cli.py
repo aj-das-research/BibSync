@@ -288,6 +288,14 @@ def add(
     help="Write a machine-readable JSON report (every suggestion, every "
     "grounding decision) to this path. Useful for CI / editor integrations.",
 )
+@click.option(
+    "--no-memory",
+    is_flag=True,
+    default=False,
+    help="Disable cross-run citation memory for this run. Candidates that "
+    "memory would have skipped (previously rejected) will be re-evaluated; "
+    "accept/reject decisions from this run will NOT be persisted.",
+)
 def suggest_cmd(
     tex_file: Path,
     bib_path: Path,
@@ -302,6 +310,7 @@ def suggest_cmd(
     cache_dir: Optional[Path],
     no_cache: bool,
     output_json: Optional[Path],
+    no_memory: bool,
 ) -> None:
     """Read TEX_FILE, find paragraphs without citations, suggest + insert appropriate ones.
 
@@ -409,6 +418,7 @@ def suggest_cmd(
         embedding_backend=verify_embedding_backend,
         cache_dir=cache_dir,
         no_cache=no_cache,
+        use_memory=not no_memory,
     )
 
     t = Table(title=f"Suggestion report — {tex_file}", show_lines=True)

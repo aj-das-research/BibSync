@@ -465,6 +465,7 @@ async def _resolve_suggestion(
     embed_store=None,
     no_cache: bool = False,
     ss_api_key: Optional[str] = None,
+    mem=None,
 ) -> tuple[SuggestionResult, Optional[dict]]:
     """Agentic pipeline for one suggested citation:
 
@@ -612,6 +613,34 @@ async def _resolve_suggestion(
                 evaluated.add(candidate.cluster_id)
                 continue
 
+            # Memory pre-skip — was this exact candidate already rejected for
+            # a similar claim in a previous run? Use the cluster_id as the
+            # paper key for memory lookup (it's the most stable identifier
+            # we have at this point in the pipeline; Scholar hasn't been
+            # asked for BibTeX yet, so no DOI/arXiv ID).
+            if mem is not None and candidate.cluster_id:
+                paper_key_for_mem = f"scholar-{candidate.cluster_id}"
+                prior = mem.recall(
+                    suggestion.anchor,
+                    paper_key=paper_key_for_mem,
+                    types=["reject"],
+                )
+                if prior:
+                    dbg.trace(
+                        "suggest.memory",
+                        "SKIP — previously rejected",
+                        candidate_idx=cand_i + 1,
+                        title=candidate.title,
+                        prior_decision=prior[0].decision,
+                        prior_age=prior[0].ts,
+                    )
+                    last_reason = (
+                        f"memory: previously rejected — {prior[0].rationale}"
+                    )
+                    last_confidence = 1.0
+                    evaluated.add(candidate.cluster_id)
+                    continue
+
             # Filter B — cluster-id dedup (catches "same paper cited for two claims").
             if candidate.cluster_id and candidate.cluster_id in used:
                 dbg.trace(
@@ -705,6 +734,22 @@ async def _resolve_suggestion(
                     conf=round(grounding.confidence, 2),
                     reason=grounding.reason,
                 )
+                # Persist the Filter D rejection so the next run skips this
+                # exact candidate without re-judging it. Cluster-id keyed for
+                # stability (we haven't fetched BibTeX yet at this point so
+                # don't have a DOI/arXiv ID).
+                if mem is not None and candidate.cluster_id:
+                    mem.remember(
+                        type_="reject",
+                        claim_text=suggestion.anchor,
+                        paper_key=f"scholar-{candidate.cluster_id}",
+                        decision="filter_d_reject",
+                        tier=grounding.achieved_tier,
+                        confidence=grounding.confidence,
+                        source="suggest_filter_d",
+                        rationale=grounding.reason,
+                        scope="project",
+                    )
                 continue
 
             # Both Filter C (canonicality) AND Filter D (grounding) accept.
@@ -832,6 +877,7 @@ async def suggest_for_file(
     cache_dir: Optional[Path] = None,
     no_cache: bool = False,
     ss_api_key: Optional[str] = None,
+    use_memory: bool = True,
 ) -> SuggestReport:
     """Scan ``tex_file`` paragraph-by-paragraph for missing citations.
 
@@ -892,6 +938,24 @@ async def suggest_for_file(
             backend=embedding_backend,
         )
 
+    # ── Memory setup ────────────────────────────────────────────────────────
+    # Project-scoped memory of accept/reject decisions. Reads short-circuit
+    # Scholar+Filter C+D when we've previously decided on the same
+    # (claim, paper) — saves the slowest part of suggest (Playwright).
+    # Writes capture each user accept/reject so the next run can recall.
+    from . import memory as memory_mod
+    if cache_dir is None:
+        from platformdirs import user_cache_dir
+        cache_dir = Path(user_cache_dir("bibsync", "bibsync"))
+    mem = memory_mod.open_memory(
+        project_root=tex_file.parent, enabled=use_memory, cache_dir=Path(cache_dir),
+    )
+    dbg.trace(
+        "suggest.memory",
+        "enabled" if use_memory else "disabled",
+        project_id=mem.project_id,
+    )
+
     # Track which Scholar cluster_ids we've already cited in THIS run. If two
     # different anchors both resolve to the same paper, the second is almost
     # certainly the wrong match (since we already wrote it for the first claim).
@@ -951,6 +1015,7 @@ async def suggest_for_file(
                     embed_store=embed_store,
                     no_cache=no_cache,
                     ss_api_key=ss_api_key,
+                    mem=mem,
                 )
 
                 if entry is None:
@@ -975,6 +1040,26 @@ async def suggest_for_file(
                     approved = approve_fn(r, entry)
                 elif not approved and approve_fn is None:
                     approved = True  # default to True when no callback provided
+
+                # Persist accept/reject to memory. Cluster-id-keyed since
+                # we haven't put cite_key into the bib yet at this point
+                # (writeback happens below).
+                if mem is not None and r.scholar_hit and r.scholar_hit.cluster_id:
+                    mem.remember(
+                        type_="accept" if approved else "reject",
+                        claim_text=r.anchor,
+                        paper_key=f"scholar-{r.scholar_hit.cluster_id}",
+                        cite_key=cite_key,
+                        decision="user_accept" if approved else "user_reject",
+                        tier=(r.grounding.achieved_tier if r.grounding else 0),
+                        confidence=(r.grounding.confidence if r.grounding else 0.0),
+                        source="suggest_user_approve",
+                        rationale=(
+                            r.grounding.reason if r.grounding
+                            else "user decision (no grounding evidence)"
+                        ),
+                        scope="project",
+                    )
 
                 if not approved:
                     r.status = "skipped"
