@@ -1073,6 +1073,37 @@ EVIDENCE: paper METADATA ONLY (title + authors + year + venue)
 You have NO abstract and NO full-text excerpts. You see only the cited paper's
 bibliographic metadata plus your own training-data knowledge.
 
+═════════════════════════════════════════════════════════════════════
+SOURCE-RESOLUTION SIGNAL (read this first — it changes the rules)
+═════════════════════════════════════════════════════════════════════
+The user message includes ``source_resolution: found | empty | unknown``:
+
+  • ``found``   — at least one of arXiv, Semantic Scholar, OpenAlex, or
+                  Crossref returned a paper matching this metadata. The
+                  paper exists. Apply the normal rules below.
+  • ``empty``   — ALL source adapters MISSED. No public database has a
+                  paper with this title + author combination. Most likely
+                  causes: the citation is FABRICATED (LLM-generated
+                  hallucination), the title is mangled, or it's a
+                  very-recent / obscure / non-indexed work.
+  • ``unknown`` — source resolution wasn't performed (rare; legacy code
+                  path). Treat conservatively as if ``empty``.
+
+WHEN source_resolution=empty:
+  ── If the title matches a clearly canonical paper you know exists in
+     your training data (e.g. "Attention Is All You Need" by Vaswani),
+     return supports=true at the normal confidence level. The miss is
+     just an adapter failure.
+  ── If the title is plausibly-real-sounding but you do NOT recognise
+     it as a canonical work, return supports=false with confidence
+     ~0.75 and reasoning "source-fetch-empty; paper not indexed in any
+     of arXiv/SS/OpenAlex/Crossref — citation may be fabricated". The
+     caller will route this to ``unverifiable`` or ``hallucinated``
+     depending on the confidence floor; never auto-deleting good cites.
+  ── This rule supersedes "topic-level claims with on-topic title get
+     supports=true." A fabricated paper has an on-topic title BY
+     CONSTRUCTION (the LLM generated it to fit the claim).
+
 Hard rules for metadata-only verdicts:
 
   • TOPIC-LEVEL claims (e.g. "the Transformer architecture introduced
@@ -1213,6 +1244,7 @@ def audit_citation(
     *,
     abstract: Optional[str] = None,
     retrieved_chunks: Optional[list[str]] = None,
+    source_resolution: str = "unknown",  # "found" | "empty" | "unknown"
     model: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> CitationAudit:
@@ -1275,6 +1307,7 @@ def audit_citation(
         f"  authors: {cited_paper_authors!r}",
         f"  year:    {cited_paper_year}",
         f"  venue:   {cited_paper_venue!r}",
+        f"  source_resolution: {source_resolution}",
     ]
     if abstract:
         user_parts.append("\nABSTRACT (Tier-1 evidence):\n" + abstract.strip())

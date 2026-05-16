@@ -414,6 +414,8 @@ async def _ground_candidate(
         evidence_summary = "abstract grounded" if achieved_tier == 1 else "chunks grounded"
 
     # Now run the strengthened audit prompt with whatever evidence we got.
+    # We're inside _ground_candidate which is only called when content is
+    # already non-None (we fetched the paper), so source_resolution="found".
     audit = llm.audit_citation(
         claim_text=claim_text,
         cited_paper_title=content.title or candidate.title,
@@ -422,6 +424,7 @@ async def _ground_candidate(
         cited_paper_venue=content.venue or (candidate.venue or ""),
         abstract=content.abstract,
         retrieved_chunks=retrieved_chunk_texts,
+        source_resolution="found",
         model=model,
         api_key=api_key,
     )

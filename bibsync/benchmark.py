@@ -300,6 +300,10 @@ async def _run_audit_case(
                 ]
                 achieved_tier = 2
 
+    # source_resolution flag tells the judge whether any adapter returned the
+    # paper. For fabricated citations all adapters miss, and the Tier-0 rule
+    # in the system prompt refuses to verify on plausible-title-alone.
+    source_resolution = "found" if content is not None else "empty"
     verdict = llm.audit_citation(
         claim_text=case.claim,
         cited_paper_title=title,
@@ -308,21 +312,23 @@ async def _run_audit_case(
         cited_paper_venue=venue,
         abstract=abstract,
         retrieved_chunks=retrieved_chunks,
+        source_resolution=source_resolution,
         model=model,
         api_key=api_key,
     )
 
-    # Translate (supports, confidence, contradicted) → status using the same
-    # rules as audit.audit_project, so the benchmark scores the same
-    # predictions a real ``bibsync audit`` run would produce.
-    if verdict.supports:
-        predicted = "verified"
-    elif verdict.contradicted and verdict.confidence >= confidence_floor:
-        predicted = "contradicted"
-    elif verdict.confidence >= confidence_floor:
-        predicted = "hallucinated"
-    else:
-        predicted = "unverifiable"
+    # Translate (supports, confidence, contradicted) → status using the
+    # SHARED helper so the benchmark scores the same predictions a real
+    # ``bibsync audit`` run would produce — including both safety nets.
+    from .audit import verdict_to_status
+    predicted, _reasoning = verdict_to_status(
+        verdict,
+        evidence_tier=achieved_tier,
+        claim_text=case.claim,
+        confidence_floor=confidence_floor,
+        requested_tier=tier,
+        source_resolved=(content is not None),
+    )
 
     return CaseResult(
         case=case,

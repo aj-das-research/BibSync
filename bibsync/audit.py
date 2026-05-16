@@ -396,6 +396,68 @@ _QUANTITATIVE_VALUE_RE = re.compile(
 )
 
 
+def verdict_to_status(
+    verdict,                              # llm.CitationAudit
+    *,
+    evidence_tier: int,
+    claim_text: str,
+    confidence_floor: float = 0.7,
+    requested_tier: int = 0,
+    source_resolved: bool = True,
+) -> tuple[str, str]:
+    """Map ``(verdict, context)`` to a final status string + reasoning.
+
+    Centralised so audit_project, the benchmark runner, the future
+    `bibsync serve` endpoint, and any external caller all apply the same
+    safety nets. Status values:
+
+      verified      — LLM said supports=true and no safety net fired.
+      hallucinated  — LLM said supports=false with high conf,
+                      OR safety-net 2 (source-fetch-empty + LLM verified).
+      contradicted  — LLM said supports=false AND contradicted=true.
+      unverifiable  — LLM was low-confidence, OR safety-net 1
+                      (Tier-0 quantitative-claim guard) fired.
+    """
+    # SAFETY NET 1 — Tier-0 quantitative-claim guard.
+    # Block: metadata-only evidence cannot verify a number-bearing claim.
+    if (
+        evidence_tier == 0
+        and verdict.supports
+        and _is_quantitative_claim(claim_text)
+    ):
+        return (
+            "unverifiable",
+            "metadata-only evidence cannot verify a quantitative / "
+            "named-benchmark claim; re-run with --tier 1 or --tier 2",
+        )
+
+    # SAFETY NET 2 — source-fetch-empty guard.
+    # All adapters missed AND LLM still verified at high confidence → likely
+    # fabricated citation. Threshold deliberately HIGH so legitimate-niche
+    # unindexed papers land as `verified` (which prompt + adapter quality
+    # should already make rare).
+    if (
+        requested_tier >= 1
+        and not source_resolved
+        and verdict.supports
+        and verdict.confidence >= confidence_floor
+    ):
+        return (
+            "hallucinated",
+            "source-fetch-empty: no adapter (arXiv / SS / OpenAlex / "
+            "Crossref) found this paper. Citation may be fabricated. "
+            f"(LLM judgement: {verdict.reasoning})",
+        )
+
+    if verdict.supports:
+        return ("verified", verdict.reasoning)
+    if verdict.contradicted and verdict.confidence >= confidence_floor:
+        return ("contradicted", verdict.reasoning)
+    if verdict.confidence >= confidence_floor:
+        return ("hallucinated", verdict.reasoning)
+    return ("unverifiable", verdict.reasoning)
+
+
 def _make_contradiction_query(claim: str) -> Optional[str]:
     """Build a retrieval query that targets contradicting evidence for a
     quantitative claim.
@@ -818,6 +880,9 @@ async def audit_project(
                     age=best_recall.ts,
                 )
             else:
+                # Tell the judge whether ANY source returned this paper —
+                # critical for catching fabricated citations at Tier 0.
+                source_resolution = "found" if content is not None else "empty"
                 verdict = llm.audit_citation(
                     claim_text=check.claim_text,
                     cited_paper_title=title,
@@ -826,6 +891,7 @@ async def audit_project(
                     cited_paper_venue=venue,
                     abstract=abstract,
                     retrieved_chunks=retrieved_chunk_texts,
+                    source_resolution=source_resolution,
                     model=model,
                     api_key=api_key,
                 )
@@ -837,42 +903,30 @@ async def audit_project(
         check.confidence = verdict.confidence
         check.reasoning = verdict.reasoning
 
-        # SAFETY NET — if we only had metadata (Tier 0) and the claim contains
-        # quantitative / named-benchmark content, refuse to high-confidence
-        # verify on title-alone. This catches the case where the LLM ignores
-        # the Tier-0 prompt rule and still returns supports=true on a number-
-        # bearing claim. We don't FLIP to "hallucinated" — that would risk
-        # auto-deleting good citations — we route to "unverifiable" so the
-        # user sees the gap and can re-run at higher tier.
-        if (
-            check.evidence_tier == 0
-            and verdict.supports
-            and _is_quantitative_claim(check.claim_text)
-        ):
-            check.status = "unverifiable"
-            check.reasoning = (
-                "metadata-only evidence cannot verify a quantitative / "
-                "named-benchmark claim; re-run with --tier 1 or --tier 2"
-            )
+        # Centralised verdict→status mapping (includes safety nets).
+        status, reasoning = verdict_to_status(
+            verdict,
+            evidence_tier=check.evidence_tier,
+            claim_text=check.claim_text,
+            confidence_floor=confidence_floor,
+            requested_tier=tier,
+            source_resolved=(content is not None),
+        )
+        check.status = status
+        check.reasoning = reasoning
+        if status == "unverifiable" and verdict.supports:
             dbg.trace(
                 "audit.safety",
-                "downgraded Tier-0 supports=true on quantitative claim",
+                "Tier-0 quantitative-claim safety net fired",
                 key=check.cite_key,
-                claim=check.claim_text[:80],
             )
-        elif verdict.supports:
-            check.status = "verified"
-        elif verdict.contradicted and verdict.confidence >= confidence_floor:
-            # Distinct from `hallucinated`: the paper exists, IS the right
-            # canonical source for the topic, but reports a DIFFERENT value
-            # than the claim states. User action: fix the prose, not the
-            # citation. --fix DOES NOT auto-edit these (different from
-            # hallucinated) because the cite itself is correct.
-            check.status = "contradicted"
-        elif verdict.confidence >= confidence_floor:
-            check.status = "hallucinated"
-        else:
-            check.status = "unverifiable"
+        elif status == "hallucinated" and verdict.supports:
+            dbg.trace(
+                "audit.safety",
+                "source-fetch-empty safety net fired",
+                key=check.cite_key,
+                conf=verdict.confidence,
+            )
 
         dbg.trace(
             "audit.check",
