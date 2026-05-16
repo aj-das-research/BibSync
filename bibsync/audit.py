@@ -88,6 +88,12 @@ class CitationCheck:
     # actionable advice). Derived from existing fields — no extra LLM call.
     issue_type: str = ""
 
+    # Short evidence quotes (1-3 sentences each) extracted from the
+    # retrieved chunks. UI-friendly — the chunk-form is too long for a
+    # side-panel card. Built by `evidence.build_evidence_spans` after
+    # retrieval. Empty when evidence_tier < 2 or retrieval missed.
+    evidence_spans: list = field(default_factory=list)  # list[dict]
+
 
 @dataclass
 class AuditReport:
@@ -149,6 +155,10 @@ class AuditReport:
                     "contradiction_type": c.contradiction_type,
                     "claimed_value": c.claimed_value,
                     "actual_value": c.actual_value,
+                    # Short evidence quotes (1-3 sentences) keyed to chunk
+                    # + page, for UI rendering. Empty list when no Tier-2
+                    # retrieval ran.
+                    "evidence": c.evidence_spans,
                 }
                 for c in self.checks
             ],
@@ -855,6 +865,21 @@ async def audit_project(
                         ]
                         check.n_chunks = len(retrieved_chunk_texts)
 
+                        # Extract short evidence quotes for the UI / JSON
+                        # output. Pure-Python compression of the 800-word
+                        # chunks down to 1-3 sentences each. Free per check.
+                        from .evidence import build_evidence_spans
+                        spans = build_evidence_spans(
+                            [c for c, _ in top],
+                            check.claim_text,
+                            paper_key=paper_key,
+                            paper_title=(content.title or ""),
+                            chunk_scores=[s for _, s in top],
+                            evidence_type="supporting",
+                            max_spans=rag_top_k,
+                        )
+                        check.evidence_spans = [s.to_dict() for s in spans]
+
                         # Contradiction retrieval — only for quantitative
                         # claims (per claim-type routing). Retrieves a
                         # SMALL extra pool (top-3) with the value stripped
@@ -1016,6 +1041,12 @@ async def audit_project(
             evidence_tier=check.evidence_tier,
             contradiction_type=check.contradiction_type,
         )
+        # If the verdict is `contradicted`, relabel the evidence spans
+        # accordingly — the same chunks that were "supporting" candidates
+        # are now the source of the contradicting evidence.
+        if check.status == "contradicted":
+            for span in check.evidence_spans:
+                span["type"] = "contradicting"
         if status == "unverifiable" and verdict.supports:
             dbg.trace(
                 "audit.safety",
