@@ -976,6 +976,16 @@ class CitationAudit:
     reasoning: str
     contradicted: bool = False  # paper actively reports something different
 
+    # Structured contradiction payload — populated by the Tier-2 prompt when
+    # contradicted=true. Kept as plain strings so the UI can render them
+    # directly without re-parsing the LLM's free-form reasoning.
+    contradiction_type: str = ""   # "numeric_value_mismatch" | "named_entity_mismatch"
+                                    # | "dataset_mismatch" | "model_version_mismatch"
+                                    # | "structural_property_mismatch" | ""
+    claimed_value: str = ""        # what the claim asserts (e.g. "24 layers, 340M parameters")
+    actual_value: str = ""         # what the paper actually reports
+                                    # (e.g. "12 layers, 110M parameters")
+
 
 _AUDIT_CITATION_SYSTEM = """\
 You are auditing an EXISTING citation in academic prose. The user has a CLAIM and a
@@ -1051,17 +1061,49 @@ confidently. False supports>0.85 should only be returned when you're certain.
 
 Return a single JSON object:
   {
-    "supports":    true | false,
-    "confidence":  0.0 to 1.0,
-    "reasoning":   "one short sentence — what tells you it does or doesn't support",
-    "contradicted": true | false   // OPTIONAL — see Tier-2 suffix
+    "supports":            true | false,
+    "confidence":          0.0 to 1.0,
+    "reasoning":           "one short sentence — what tells you it does or doesn't support",
+    "contradicted":        true | false,        // OPTIONAL — see Tier-2 suffix
+    "contradiction_type":  string,              // OPTIONAL; only when contradicted=true
+    "claimed_value":       string,              // OPTIONAL; only when contradicted=true
+    "actual_value":        string               // OPTIONAL; only when contradicted=true
   }
 
 The ``contradicted`` field defaults to false. Set it to true ONLY when the
 retrieved evidence actively REFUTES the claim with a specific conflicting
-value (e.g. claim says "X reaches 90% on Y", retrieved chunk says "X reaches
-17.8% on Y"). Mere absence of evidence is NOT contradiction — that's just
-unsupported. See the Tier-2 suffix for the precise rule.
+value. When you do, ALSO populate:
+
+  ``contradiction_type``:
+    "numeric_value_mismatch"        — different numbers for the same metric
+                                       (e.g. claim "90%" vs paper "17.8%")
+    "named_entity_mismatch"         — wrong benchmark / dataset name
+                                       (e.g. claim "MedQA" vs paper "PubMedQA")
+    "model_version_mismatch"        — wrong variant of a named model
+                                       (e.g. claim "BERT-base 24 layers" but
+                                        paper says BERT-LARGE has 24 layers)
+    "structural_property_mismatch"  — wrong relative property
+                                       (e.g. claim "ResNet-50 is the deepest"
+                                        but paper says ResNet-152 is the deepest)
+    "dataset_mismatch"              — wrong dataset / split
+
+  ``claimed_value``: short string capturing what the claim said (≤ 60 chars)
+  ``actual_value``:  short string capturing what the paper actually says
+
+Example:
+  {
+    "supports": false,
+    "confidence": 0.95,
+    "reasoning": "paper specifies BERT-BASE has L=12, 110M params; the claim's
+                  24 layers / 340M values describe BERT-LARGE",
+    "contradicted": true,
+    "contradiction_type": "model_version_mismatch",
+    "claimed_value": "BERT-base: 24 layers, 340M parameters",
+    "actual_value":  "BERT-base: 12 layers, 110M parameters (24/340M is BERT-LARGE)"
+  }
+
+When in doubt, leave ``contradicted=false`` and the three structured fields
+empty. See the Tier-2 suffix for the full decision rule.
 """
 
 
@@ -1398,6 +1440,9 @@ def audit_citation(
         confidence=float(data.get("confidence") or 0.0),
         reasoning=str(data.get("reasoning") or ""),
         contradicted=bool(data.get("contradicted", False)),
+        contradiction_type=str(data.get("contradiction_type") or ""),
+        claimed_value=str(data.get("claimed_value") or ""),
+        actual_value=str(data.get("actual_value") or ""),
     )
     dbg.trace(
         "llm.audit",

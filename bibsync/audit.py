@@ -74,6 +74,13 @@ class CitationCheck:
     #   "embedding_failed"   — fastembed not installed AND API embeddings unusable
     degraded_reason: str = ""
 
+    # Structured contradiction payload — populated when status="contradicted".
+    # Mirrors llm.CitationAudit fields. Used by the JSON output and by the
+    # future Chrome extension's diff UI.
+    contradiction_type: str = ""
+    claimed_value: str = ""
+    actual_value: str = ""
+
 
 @dataclass
 class AuditReport:
@@ -129,6 +136,11 @@ class AuditReport:
                     "paper_arxiv_id": (
                         c.paper_content.arxiv_id if c.paper_content else None
                     ),
+                    # Structured contradiction payload — empty strings unless
+                    # status="contradicted".
+                    "contradiction_type": c.contradiction_type,
+                    "claimed_value": c.claimed_value,
+                    "actual_value": c.actual_value,
                 }
                 for c in self.checks
             ],
@@ -914,6 +926,13 @@ async def audit_project(
         )
         check.status = status
         check.reasoning = reasoning
+        # Surface the structured contradiction payload for `contradicted`
+        # verdicts so the JSON output and the future extension can render a
+        # diff (claim says X, paper says Y).
+        if status == "contradicted":
+            check.contradiction_type = verdict.contradiction_type
+            check.claimed_value = verdict.claimed_value
+            check.actual_value = verdict.actual_value
         if status == "unverifiable" and verdict.supports:
             dbg.trace(
                 "audit.safety",
