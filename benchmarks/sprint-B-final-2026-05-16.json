@@ -1,0 +1,262 @@
+{
+  "n_cases": 20,
+  "accuracy": 0.85,
+  "false_deletion_rate": 0.0,
+  "elapsed_sec": 68.820958166,
+  "per_label": {
+    "contradicted": {
+      "support": 3,
+      "precision": 1.0,
+      "recall": 0.6666666666666666,
+      "f1": 0.8
+    },
+    "hallucinated": {
+      "support": 8,
+      "precision": 0.8571428571428571,
+      "recall": 0.75,
+      "f1": 0.7999999999999999
+    },
+    "missing_in_bib": {
+      "support": 1,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    "verified": {
+      "support": 8,
+      "precision": 0.8,
+      "recall": 1.0,
+      "f1": 0.888888888888889
+    }
+  },
+  "confusion": {
+    "verified->verified": 8,
+    "hallucinated->hallucinated": 6,
+    "hallucinated->verified": 2,
+    "contradicted->contradicted": 2,
+    "missing_in_bib->missing_in_bib": 1,
+    "contradicted->hallucinated": 1
+  },
+  "cases": [
+    {
+      "id": "verified-vaswani-self-attention",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 4.25,
+      "reasoning": "The paper discusses the Transformer architecture, which 'replaces the recurrent layers most commonly used in encoder-decoder architectures with multi-headed self-attention' (p.10)."
+    },
+    {
+      "id": "verified-bert-architecture-spec",
+      "category": "quantitative-architecture-spec",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.87,
+      "reasoning": "The paper states that 'BERTBASE (L=12, H=768, A=12, Total Parameters=110M)' (p.7), confirming the claim about BERT-base having 12 layers and 110M parameters, and it also mentions that BERT was pretrained on 'BooksCorpus and Wikipedia' (p.14)."
+    },
+    {
+      "id": "hallucinated-gpt3-medqa-misattribution",
+      "category": "quantitative-misattribution-headline",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 3.97,
+      "reasoning": "no chunk mentions 'MedQA' or any number near 86.5% \u2014 likely misattribution."
+    },
+    {
+      "id": "hallucinated-resnet-protein-structure",
+      "category": "field-cross-contamination",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 5.72,
+      "reasoning": "The paper discusses ResNet architectures but does not mention training with 100 billion parameters or achieving state-of-the-art results on protein structure prediction."
+    },
+    {
+      "id": "verified-resnet-image-classification",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.49,
+      "reasoning": "The paper discusses a residual learning framework that uses identity shortcuts to ease the training of very deep networks, stating 'the existence of this constructed solution indicates that a deeper model should produce no higher training error than its shallower counterpart' (p.3)."
+    },
+    {
+      "id": "hallucinated-version-conflict-gpt4-for-gpt3",
+      "category": "version-conflict",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 3.7,
+      "reasoning": "The paper discusses GPT-4 and its capabilities but does not mention GPT-3 or its parameter count of 175 billion, which is central to the claim."
+    },
+    {
+      "id": "hallucinated-survey-cited-as-original",
+      "category": "survey-vs-original",
+      "expected": "hallucinated",
+      "predicted": "verified",
+      "correct": false,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 5.66,
+      "reasoning": "The paper discusses the development of the attention mechanism and its application in neural networks, including its role in addressing limitations of recurrent networks, as indicated by the phrase 'self-attention was successfully implemented within a neural network architecture namely Long Short-Term Memory-Networks (LSTMN)' (p.7)."
+    },
+    {
+      "id": "verified-bert-paradigm-claim",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 3.02,
+      "reasoning": "The abstract states that BERT is designed to 'pre-train deep bidirectional representations' and can be 'fine-tuned with just one additional output layer', which aligns with the claim about establishing the pretraining-then-finetuning paradigm."
+    },
+    {
+      "id": "hallucinated-wrong-paper-for-imagenet-result",
+      "category": "quantitative-cross-paper",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.52,
+      "reasoning": "The cited paper discusses ResNet's performance on ImageNet but does not mention AlexNet or its top-5 error rate of 15.3%."
+    },
+    {
+      "id": "verified-generic-background-with-vaswani",
+      "category": "generic-background",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.67,
+      "reasoning": "The paper discusses the Transformer architecture, which is based solely on attention mechanisms and has become a dominant model in NLP, as stated in the abstract: 'We propose a new simple network architecture, the Transformer, based solely on attention mechanisms.'"
+    },
+    {
+      "id": "hallucinated-bert-cv-claim",
+      "category": "field-cross-contamination",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 3.0,
+      "reasoning": "The paper focuses on BERT's performance in natural language processing tasks, not on image classification benchmarks like ImageNet."
+    },
+    {
+      "id": "verified-gpt3-fewshot-claim",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 3.1,
+      "reasoning": "The abstract states that 'scaling up language models greatly improves task-agnostic, few-shot performance', which aligns with the claim about GPT-3's strong few-shot performance across diverse NLP tasks."
+    },
+    {
+      "id": "hallucinated-fabricated-author-year",
+      "category": "fabricated-citation",
+      "expected": "hallucinated",
+      "predicted": "verified",
+      "correct": false,
+      "confidence": 0.9,
+      "evidence_tier": 0,
+      "elapsed_sec": 6.5,
+      "reasoning": "The paper's title directly matches the claim's topic about rectified flow matching and its application to accelerated diffusion training."
+    },
+    {
+      "id": "verified-resnet-deep-network-claim",
+      "category": "topical-method-attribution",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.81,
+      "reasoning": "The paper discusses how residual connections help in training deeper networks, stating that 'our extremely deep residual nets are easy to optimize' and that they 'do not observe the degradation problem', which aligns with the claim about enabling training of networks with hundreds of layers."
+    },
+    {
+      "id": "contradicted-medqa-865-misattribution",
+      "category": "contradicted-quantitative",
+      "expected": "contradicted",
+      "predicted": "contradicted",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 6.54,
+      "reasoning": "The paper reports that Flan-PaLM achieves 67.6% accuracy on MedQA, not 86.5% as claimed."
+    },
+    {
+      "id": "missing-in-bib-broken-key",
+      "category": "broken-reference",
+      "expected": "missing_in_bib",
+      "predicted": "missing_in_bib",
+      "correct": true,
+      "confidence": 1.0,
+      "evidence_tier": 0,
+      "elapsed_sec": 0.0,
+      "reasoning": "no bib_entry provided"
+    },
+    {
+      "id": "verified-bert-pretraining-data",
+      "category": "factual-content-claim",
+      "expected": "verified",
+      "predicted": "verified",
+      "correct": true,
+      "confidence": 0.9,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.71,
+      "reasoning": "The paper states that 'BERT is trained on the BooksCorpus (800M words) and Wikipedia (2,500M words)' (p.14), which directly supports the claim about BERT's pretraining data."
+    },
+    {
+      "id": "hallucinated-vaswani-libri-speech",
+      "category": "field-cross-contamination",
+      "expected": "hallucinated",
+      "predicted": "hallucinated",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.35,
+      "reasoning": "The paper focuses on machine translation tasks and does not mention the LibriSpeech benchmark or any word error rate, indicating a clear topic mismatch."
+    },
+    {
+      "id": "contradicted-bert-base-24-layers",
+      "category": "contradicted-quantitative",
+      "expected": "contradicted",
+      "predicted": "contradicted",
+      "correct": true,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.54,
+      "reasoning": "The paper specifies that BERT-base has 12 transformer layers and 110M parameters, not 24 layers and 340M parameters."
+    },
+    {
+      "id": "contradicted-resnet-50-100m-params",
+      "category": "contradicted-quantitative",
+      "expected": "contradicted",
+      "predicted": "hallucinated",
+      "correct": false,
+      "confidence": 0.95,
+      "evidence_tier": 2,
+      "elapsed_sec": 2.37,
+      "reasoning": "The paper does not mention that ResNet-50 has 100 million parameters; it discusses deeper networks but does not provide specific parameter counts for ResNet-50."
+    }
+  ]
+}

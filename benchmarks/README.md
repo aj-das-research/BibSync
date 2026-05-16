@@ -41,7 +41,9 @@ bibsync bench show
 }
 ```
 
-## Tier-A sprint result snapshot
+## Sprint history
+
+### Sprint A — retrieval + sources + contradiction verdict
 
 | Stage | Cases | Accuracy | FDR | Δ vs prior |
 |---|---:|---:|---:|---|
@@ -52,13 +54,32 @@ bibsync bench show
 | + A4 contradicted (ee3e938) | **20** | 85.0% | 0.0% | new cases added, retained safety |
 | + A5 JSON output (f17374d) | 20 | 85.0% | 0.0% | 0 (cosmetic on the metric) |
 
-**Headline:** baseline 77.8% → final 85.0% with **0% false-deletion rate
-throughout** — the headline safety metric (wrongly flagging a real citation
-as hallucinated) was never allowed to regress.
+### Sprint B — memory + table-aware RAG + reranker + claim-type routing
 
-Wall-clock on a warm cache: 133s → 58s — the extra sources fail-fast on
-cache hits, and hybrid BM25 + contradiction retrieval add only local
-computation, no extra LLM calls.
+| Stage | Cases | Accuracy | FDR | Wall | Δ |
+|---|---:|---:|---:|---:|---|
+| Sprint-A final (f17374d) | 20 | 85.0% | 0.0% | 57.5s | — |
+| + M1 memory module (46d15bf) | 20 | 85.0% | 0.0% | — | foundation only |
+| + M2 memory CLI (2ee60f9) | 20 | 85.0% | 0.0% | — | inspection only |
+| + M3 audit ⇆ memory (c77a64e) | 20 | 85.0% | 0.0% | 0–3s on warm cache | **LLM call cost → 0 on repeat runs** |
+| + M4 suggest ⇆ memory (7a6050d) | 20 | 85.0% | 0.0% | — | offline-verified wiring |
+| + M5 table-aware chunker (2053c88) | 20 | 85.0% | 0.0% | — | 4 BERT tables + 14 ResNet + 2 Vaswani extracted |
+| + M6 cross-encoder rerank (103c740) | 20 | 85.0% | 0.0% | 82.1s | precision↑ (1 false-positive → true-negative) |
+| + M7 claim-type routing (2c56258) | 20 | **85.0%** | **0.0%** | **68.8s** | **−16% wall clock; quality held** |
+
+**Headline (Sprint A + B):** baseline 77.8% → final 85.0% with **0% false-deletion rate throughout**. The safety metric (wrongly flagging a real citation as hallucinated) was never allowed to regress across either sprint.
+
+Wall-clock: Sprint-A 133s baseline → Sprint-B 69s final. The retrieval/sources improvements amortise heavily via the shared caches (`~/Library/Caches/bibsync/`).
+
+**The biggest measurable Sprint-B win isn't in the benchmark accuracy** — it's the on-disk **citation memory**. Live verification on `examples/audit_tier2_demo` (commit c77a64e):
+
+```
+Run 1 (cold memory):    4 llm.audit calls, 4 verdicts written, ~80s
+Run 2 (warm memory):    0 llm.audit calls, 4 verdicts recalled, ~3s
+Run 2 (--no-memory):    4 llm.audit calls (memory bypass), ~80s
+```
+
+Memory recall has zero impact on the benchmark because the runner re-builds caches per call rather than persisting across runs — but on real-world repeat audits (where most cites haven't changed), it's the difference between a 60-second run and a 3-second run.
 
 ## Adding new cases
 
@@ -72,23 +93,29 @@ computation, no extra LLM calls.
 5. Re-run the benchmark and commit the case alongside any pipeline change
    it justifies.
 
-## Remaining known failures
+## Remaining known failures (after Sprint B)
 
-Three cases consistently fail at the end of the Tier-A sprint:
+Three cases consistently fail at the end of the B sprint, all are
+LLM-judgment failures, not retrieval bugs:
 
 | ID | Tier | Mode | Underlying issue |
 |---|---|---|---|
-| `hallucinated-survey-cited-as-original` | 0 | LLM topical-only verify | Source fetch returned nothing → judge sees title only ("Attention mechanism in neural networks…") and rubber-stamps |
-| `hallucinated-fabricated-author-year` | 0 | LLM topical-only verify | Paper is fictitious so source-fetch correctly misses → judge falls to Tier-0 and accepts on title alone |
-| `contradicted-resnet-50-100m-params` | 2 | LLM lenience | Hybrid retrieved the right chunks but judge said "widely accepted that ResNet-50 has around 100M parameters" — overruled the retrieved evidence with world knowledge |
+| `hallucinated-survey-cited-as-original` | 2 | LLM doesn't distinguish survey from original | OpenAlex now returns the Soydaner 2022 survey paper, and at Tier-2 RAG sees attention-mechanism chunks (since it's a survey ABOUT attention). The LLM mis-judges as "verified" because the topic matches. Distinguishing "survey of X" from "original paper introducing X" requires the LLM to look at *contribution structure*, not just topic alignment. |
+| `hallucinated-fabricated-author-year` | 0 | LLM rubber-stamps fabricated cite on title alone | Paper is fictitious so source-fetch correctly misses → audit falls to Tier-0 and accepts on title alone. Needs a Tier-0 rule: "if all sources fail to fetch this paper, it may be fabricated." |
+| `contradicted-resnet-50-100m-params` | 2 | LLM lenience on contradiction detection | Reranker surfaced the right chunks (M6 moved this from `verified` to `hallucinated`) but the LLM didn't set `contradicted=true` — needs stronger contradiction prompt. |
 
-These are LLM-judgment failures at Tier-0 (the first two) or LLM
-prior-overrides-evidence at Tier-2 (the third), not retrieval bugs.
-Sprint B should focus on:
-1. Tier-0 prompt strengthening for source-fetch-failed cases
-   ("if no abstract is fetchable, the citation may be fabricated").
-2. Tier-2 prompt strengthening against "but it's widely known…"
-   priors that override retrieved evidence.
+Sprint C candidates:
+
+1. **Tier-2 "do not accept surveys as canonical" rule** — when the
+   paper's title/abstract contains "survey", "review", "overview", or
+   "analysis of", strong negative signal even if topic matches.
+2. **Tier-0 source-fetch-empty heuristic** — when arXiv/SS/Crossref/
+   OpenAlex all return nothing for a citation, mark `unverifiable`
+   instead of judging on title.
+3. **Tier-2 contradiction prompt strengthening** — when the LLM
+   identifies the right entity but says "the paper does not mention
+   X", require it to check whether the paper mentions the *same entity
+   with a different value* before defaulting to `supports=false`.
 
 ## Reproducing a stage
 
