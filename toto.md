@@ -38,7 +38,7 @@ Each task carries a numeric ID (`C1`, `D3`, …). Inter-task dependencies are no
 | Sprint | Theme | Goal | Status |
 |---|---|---|---|
 | **C** | Stabilise core | Close benchmark failures, structure outputs for UI consumption | `[x]` ✅ **100% accuracy / 0% FDR** |
-| **D** | Local server + patch layer | `bibsync serve` + patch model; non-browser clients can drive the AI | `[ ]` |
+| **D** | Local server + patch layer | `bibsync serve` + patch model; non-browser clients can drive the AI | `[x]` ✅ **12 endpoints, 12/12 tests pass** |
 | **E** | Chrome read-only | Side panel that displays issues, evidence, and suggested citations | `[ ]` |
 | **F** | User-approved edits | Insert/replace/append actions with undo + conflict detection | `[ ]` |
 | **G** | Project-level | Full-project audit, multi-file BibTeX, batch review | `[ ]` |
@@ -201,19 +201,19 @@ Captured here so the plan is self-grounded.
 **Goal**: A stable HTTP+JSON contract that a non-browser client (the future Chrome extension, a VS Code plugin, a CI tool) can drive without ever shelling out to the CLI.
 
 ### D1 · `bibsync serve` core
-- [ ] **Description**: Long-running local HTTP server backed by FastAPI (small, well-known, type-friendly). Default `127.0.0.1:38476` (no external binding).
-- [ ] **Implementation**:
+- [x] **Description**: Long-running local HTTP server backed by FastAPI (small, well-known, type-friendly). Default `127.0.0.1:38476` (no external binding).
+- [x] **Implementation**:
   - New module `bibsync/server.py` with the FastAPI app.
   - CLI: `bibsync serve [--host 127.0.0.1] [--port 38476] [--log /path/log.jsonl]`.
   - Health endpoint `GET /health` returning version, model status, cache size.
   - Auth: a per-process token written to `~/.config/bibsync/server.token` on launch; client must include it as `Authorization: Bearer <token>`. Prevents accidental cross-process access.
-- [ ] **Files**: `bibsync/server.py`, `bibsync/cli.py`, `pyproject.toml` (new optional dep `[server]`: `fastapi`, `uvicorn[standard]`).
-- [ ] **Acceptance**: `curl http://127.0.0.1:38476/health -H "Authorization: Bearer $TOKEN"` returns JSON.
-- [ ] **Risk**: low.
+- [x] **Files**: `bibsync/server.py`, `bibsync/cli.py`, `pyproject.toml` (new optional dep `[server]`: `fastapi`, `uvicorn[standard]`).
+- [x] **Acceptance**: `curl http://127.0.0.1:38476/health -H "Authorization: Bearer $TOKEN"` returns JSON.
+- [x] **Risk**: low.
 
 ### D2 · `POST /audit` endpoint
-- [ ] **Description**: Drives the audit pipeline from in-memory tex/bib content (no filesystem assumed).
-- [ ] **Request**:
+- [x] **Description**: Drives the audit pipeline from in-memory tex/bib content (no filesystem assumed).
+- [x] **Request**:
   ```json
   {
     "project_id": "string",
@@ -225,29 +225,29 @@ Captured here so the plan is self-grounded.
     "selection": { "file": "main.tex", "start": 1200, "end": 1580 }
   }
   ```
-- [ ] **Response**: Reuses the JSON schema from `audit.py::AuditReport.to_dict()` plus the new `issue_type`, `evidence`, `contradiction_type` fields from Sprint C.
-- [ ] **Implementation**: Server writes the tex/bib content to a temporary directory, runs `audit_project` against it, returns the report, cleans up. Caches share the user's persistent `~/Library/Caches/bibsync/` so memory recall works.
-- [ ] **Files**: `bibsync/server.py`.
-- [ ] **Acceptance**: POSTing the `audit_tier2_demo` fixture content returns the same verdicts as `bibsync audit examples/audit_tier2_demo`.
+- [x] **Response**: Reuses the JSON schema from `audit.py::AuditReport.to_dict()` plus the new `issue_type`, `evidence`, `contradiction_type` fields from Sprint C.
+- [x] **Implementation**: Server writes the tex/bib content to a temporary directory, runs `audit_project` against it, returns the report, cleans up. Caches share the user's persistent `~/Library/Caches/bibsync/` so memory recall works.
+- [x] **Files**: `bibsync/server.py`.
+- [x] **Acceptance**: POSTing the `audit_tier2_demo` fixture content returns the same verdicts as `bibsync audit examples/audit_tier2_demo`.
 
 ### D3 · `POST /suggest` endpoint
-- [ ] **Description**: Same shape as `/audit`. Returns a list of `SuggestionResult` JSON objects.
-- [ ] **Open question**: Scholar+Playwright is the slow link. Decide between (a) requiring the user to have Scholar running in headed Chrome via the existing persistent profile, or (b) skipping Scholar and using OpenAlex/SS-only when the request comes from the server. **Recommendation: (b) — server mode uses non-Scholar source path**, since the user will be IN Overleaf and can't simultaneously juggle a Scholar window.
-- [ ] **Files**: `bibsync/server.py`, `bibsync/suggest.py` (new `skip_scholar` flag).
+- [x] **Description**: Same shape as `/audit`. Returns a list of `SuggestionResult` JSON objects.
+- [x] **Open question**: Scholar+Playwright is the slow link. Decide between (a) requiring the user to have Scholar running in headed Chrome via the existing persistent profile, or (b) skipping Scholar and using OpenAlex/SS-only when the request comes from the server. **Recommendation: (b) — server mode uses non-Scholar source path**, since the user will be IN Overleaf and can't simultaneously juggle a Scholar window.
+- [x] **Files**: `bibsync/server.py`, `bibsync/suggest.py` (new `skip_scholar` flag).
 
 ### D4 · `POST /evidence` endpoint
-- [ ] **Description**: Wraps the C8 command.
-- [ ] **Request**: `{ "claim": "string", "top_papers": 5, "include_contradicting": true }`
-- [ ] **Response**: List of `EvidenceSpan` with paper attribution.
-- [ ] **Depends on**: C8.
+- [x] **Description**: Wraps the C8 command.
+- [x] **Request**: `{ "claim": "string", "top_papers": 5, "include_contradicting": true }`
+- [x] **Response**: List of `EvidenceSpan` with paper attribution.
+- [x] **Depends on**: C8.
 
 ### D5 · `POST /source-rank` endpoint
-- [ ] **Description**: Wraps the C9 command.
-- [ ] **Depends on**: C9.
+- [x] **Description**: Wraps the C9 command.
+- [x] **Depends on**: C9.
 
 ### D6 · Patch model
-- [ ] **Description**: All edits flow through patches. A patch is a JSON object describing a single change to a single file. Never apply edits directly from audit output.
-- [ ] **Patch types**:
+- [x] **Description**: All edits flow through patches. A patch is a JSON object describing a single change to a single file. Never apply edits directly from audit output.
+- [x] **Patch types**:
   ```
   insert_citation        \cite{key} at offset
   replace_citation       swap one key for another
@@ -258,7 +258,7 @@ Captured here so the plan is self-grounded.
   fix_claim_text         user-driven, AI suggests, never auto-applies
   add_comment            inline %-comment with reasoning
   ```
-- [ ] **Schema**:
+- [x] **Schema**:
   ```json
   {
     "patch_id":  "patch_abc123",
@@ -272,12 +272,12 @@ Captured here so the plan is self-grounded.
     "user_approved": false
   }
   ```
-- [ ] **Files**: New `bibsync/patches.py` with `Patch` dataclass, validators, and `apply(patches, files)` function.
-- [ ] **Acceptance**: Patches round-trip through JSON without data loss; `apply()` is deterministic and reports per-patch success/failure.
+- [x] **Files**: New `bibsync/patches.py` with `Patch` dataclass, validators, and `apply(patches, files)` function.
+- [x] **Acceptance**: Patches round-trip through JSON without data loss; `apply()` is deterministic and reports per-patch success/failure.
 
 ### D7 · `POST /patch/preview` endpoint
-- [ ] **Description**: Given a set of patches, return what the files would look like AFTER application (without writing anything). For UI diff rendering.
-- [ ] **Response**:
+- [x] **Description**: Given a set of patches, return what the files would look like AFTER application (without writing anything). For UI diff rendering.
+- [x] **Response**:
   ```json
   {
     "preview": {
@@ -287,34 +287,34 @@ Captured here so the plan is self-grounded.
     "conflicts": []  // patches whose old_text doesn't match current content
   }
   ```
-- [ ] **Depends on**: D6.
+- [x] **Depends on**: D6.
 
 ### D8 · `POST /patch/apply` endpoint
-- [ ] **Description**: Apply patches to in-memory file content; return the post-application content. The client (extension) is responsible for writing the result back to its host (Overleaf).
-- [ ] **Atomicity**: All patches succeed or none do. Returns `{ "ok": bool, "files": {...}, "errors": [...] }`.
-- [ ] **Depends on**: D6.
+- [x] **Description**: Apply patches to in-memory file content; return the post-application content. The client (extension) is responsible for writing the result back to its host (Overleaf).
+- [x] **Atomicity**: All patches succeed or none do. Returns `{ "ok": bool, "files": {...}, "errors": [...] }`.
+- [x] **Depends on**: D6.
 
 ### D9 · Project/session IDs + privacy endpoint
-- [ ] **Description**: Every request carries a `project_id`. Server stamps this onto memory writes for the per-project scope. New endpoint `GET /privacy` returns what data is held for the current project_id.
-- [ ] **Files**: `bibsync/server.py`, `bibsync/memory.py` (no schema change, just exposes the project's records).
+- [x] **Description**: Every request carries a `project_id`. Server stamps this onto memory writes for the per-project scope. New endpoint `GET /privacy` returns what data is held for the current project_id.
+- [x] **Files**: `bibsync/server.py`, `bibsync/memory.py` (no schema change, just exposes the project's records).
 
 ### D10 · Memory endpoints
-- [ ] **Description**:
+- [x] **Description**:
   - `GET /memory?project_id=...&type=...` — list records
   - `POST /memory/forget` — write tombstone for a record_id
   - `DELETE /memory/project` — purge_project equivalent
-- [ ] **Depends on**: D9.
+- [x] **Depends on**: D9.
 
 ### D11 · Cache status + control
-- [ ] **Description**: `GET /cache/status` returns sizes (paper_content, pdfs, embeddings, memory). `POST /cache/clear` clears optional caches (not memory).
+- [x] **Description**: `GET /cache/status` returns sizes (paper_content, pdfs, embeddings, memory). `POST /cache/clear` clears optional caches (not memory).
 
 ### D12 · OpenAPI spec + Python SDK
-- [ ] **Description**: FastAPI auto-generates OpenAPI; we export it at `/openapi.json`. Add a tiny `bibsync.client` Python helper for testing.
-- [ ] **Acceptance**: `bibsync.client.AuditClient("http://127.0.0.1:38476", token).audit(...)` mirrors `audit_project_sync` semantics.
+- [x] **Description**: FastAPI auto-generates OpenAPI; we export it at `/openapi.json`. Add a tiny `bibsync.client` Python helper for testing.
+- [x] **Acceptance**: `bibsync.client.AuditClient("http://127.0.0.1:38476", token).audit(...)` mirrors `audit_project_sync` semantics.
 
 ### D13 · Server tests
-- [ ] **Description**: End-to-end test against the audit_tier2_demo fixture posted to the server, verifies the response matches the CLI's `--output-json` output.
-- [ ] **Files**: `tests/test_server.py`.
+- [x] **Description**: End-to-end test against the audit_tier2_demo fixture posted to the server, verifies the response matches the CLI's `--output-json` output.
+- [x] **Files**: `tests/test_server.py`.
 
 **Sprint-D success target**: A non-browser client (the test harness, a curl invocation, a Python script) can POST tex/bib content and receive structured issues + patches + evidence — no CLI invocation, no filesystem assumptions.
 
@@ -531,6 +531,7 @@ Captured here so the plan is self-grounded.
 - **C9 done** (`94000e7`) — `bibsync source-rank "title or claim"` ranking by combined canonicality signals (cited_by + LLM-identified canonicality + venue prior + recency − survey penalty). Live-verified: Vaswani at rank #1 with score +0.96, survey-style papers correctly demoted.
 - **C10 done** (`23b0e07`) — OpenAlex citation-graph signals fed into Filter C. New `canonicality_signals` kwarg on `verify_claim_support` carries `is_survey_title`, `openalex_doi`, `openalex_arxiv_id`, etc. System prompt extended with rules for using these signals. Used to escape the "popular survey outranks original" trap.
 - **C11 (final)** — **Full benchmark: 100% accuracy (20/20), 0% FDR, 51.6s wall clock**. Sprint C complete. Snapshot saved to `benchmarks/sprint-C-final-2026-05-16.json`.
+- **Sprint D in one block** — `bibsync/patches.py` (Patch model with atomic apply + preview + conflict detection, 10 unit tests pass), `bibsync/server.py` (FastAPI app with 12 endpoints: /health, /audit, /suggest, /evidence, /source-rank, /patch/{preview,apply}, /memory*, /cache/*, /privacy, /openapi.json), `bibsync serve` CLI command (token auth, refuses external binds unless `BIBSYNC_ALLOW_EXTERNAL=1`), `tests/test_server.py` (12/12 passing). End-to-end live test against audit_tier2_demo confirms the server matches CLI output exactly — same 2 verified / 2 hallucinated verdicts in 28.3s.
 
 ---
 

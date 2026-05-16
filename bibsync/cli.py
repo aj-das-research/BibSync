@@ -1367,6 +1367,54 @@ def source_rank_cmd(
         console.print(f"[dim]JSON written to {output_json}[/dim]")
 
 
+# serve -----------------------------------------------------------------------
+
+
+@main.command(name="serve")
+@click.option(
+    "--host", default="127.0.0.1", show_default=True,
+    help="Interface to bind. External binds (anything except 127.0.0.1 / "
+    "localhost) require BIBSYNC_ALLOW_EXTERNAL=1 in the env (NOT "
+    "recommended — your manuscript content stays local).",
+)
+@click.option(
+    "--port", type=int, default=38476, show_default=True,
+    help="Port to listen on.",
+)
+@click.option(
+    "--log-level", default="info", show_default=True,
+    type=click.Choice(["critical", "error", "warning", "info", "debug"]),
+)
+def serve_cmd(host: str, port: int, log_level: str) -> None:
+    """Start the local HTTP+JSON server.
+
+    Drives the AI from non-CLI clients (Chrome extension, VS Code,
+    scripts, CI). On launch:
+
+      • Generates a fresh per-process bearer token.
+      • Writes the token to ~/.config/bibsync/server.token (mode 0600).
+      • Binds 127.0.0.1:38476 by default.
+
+    Clients must include Authorization: Bearer <token> on every request.
+    The token is regenerated on each launch — no long-lived secrets
+    on disk between runs.
+
+    Stop with Ctrl+C; the token file persists but stops being valid.
+
+    OpenAPI docs at http://127.0.0.1:38476/docs after launch.
+    """
+    try:
+        from . import server as server_mod
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(2)
+    try:
+        server_mod.run_server(host=host, port=port, log_level=log_level)
+    except RuntimeError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(2)
+
+
 # memory -----------------------------------------------------------------------
 
 
