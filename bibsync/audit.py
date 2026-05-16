@@ -81,6 +81,13 @@ class CitationCheck:
     claimed_value: str = ""
     actual_value: str = ""
 
+    # Finer-grained issue type for UI rendering. Status is the canonical
+    # 5-value bucket (verified / hallucinated / contradicted / unverifiable
+    # / missing_in_bib); issue_type is the sub-classification that drives
+    # the UI's distinct issue cards (different severity colours, different
+    # actionable advice). Derived from existing fields — no extra LLM call.
+    issue_type: str = ""
+
 
 @dataclass
 class AuditReport:
@@ -121,6 +128,7 @@ class AuditReport:
                     "char_offset": c.char_offset,
                     "claim_text": c.claim_text,
                     "status": c.status,
+                    "issue_type": c.issue_type or c.status,  # fallback to status for legacy
                     "confidence": round(c.confidence, 3),
                     "reasoning": c.reasoning,
                     "evidence_tier": c.evidence_tier,
@@ -408,6 +416,71 @@ _QUANTITATIVE_VALUE_RE = re.compile(
 )
 
 
+# ── issue-type sub-classification (UI rendering hint) ──────────────────────
+
+
+# Heuristic — title patterns that strongly indicate a survey / review / tutorial
+# paper. Used by _issue_type_for to distinguish "survey-cited-as-original"
+# rejections from generic hallucinations.
+_SURVEY_TITLE_RE = re.compile(
+    r"\b(survey|review|overview|tutorial|comprehensive (?:analysis|evaluation)|"
+    r"what does .* learn|where it comes and where it goes|revisiting|probing)\b",
+    re.IGNORECASE,
+)
+
+
+def issue_type_for(
+    status: str,
+    *,
+    degraded_reason: str = "",
+    reasoning: str = "",
+    paper_title: str = "",
+    evidence_tier: int = 0,
+    contradiction_type: str = "",
+) -> str:
+    """Derive a UI-friendly issue type from the coarse status + other context.
+
+    Mapping (status → issue_type):
+
+      verified       → verified
+      hallucinated   → survey_cited_as_original  (when title matches survey
+                                                   pattern)
+                     | wrong_reference            (LLM said source-fetch-empty
+                                                   or fabricated)
+                     | unsupported_reference      (default for hallucinated)
+      contradicted   → contradicted_claim         (with contradiction_type
+                                                   carrying the sub-detail)
+      unverifiable   → source_unavailable         (when source-fetch failed)
+                     | weak_support               (LLM low-confidence)
+                     | needs_user_review          (everything else)
+      missing_in_bib → missing_bib_entry
+
+    Returns a single string. The 5-tuple status remains the canonical
+    bucket; this is just the UI hint.
+    """
+    if status == "verified":
+        return "verified"
+    if status == "missing_in_bib":
+        return "missing_bib_entry"
+    if status == "contradicted":
+        return "contradicted_claim"
+    if status == "hallucinated":
+        # Survey-cited-as-original detection — title pattern.
+        if paper_title and _SURVEY_TITLE_RE.search(paper_title):
+            return "survey_cited_as_original"
+        # Source-fetch-empty / fabricated-paper case (safety net 2).
+        if "source-fetch-empty" in reasoning.lower() or "may be fabricated" in reasoning.lower():
+            return "wrong_reference"
+        return "unsupported_reference"
+    if status == "unverifiable":
+        if degraded_reason in {"source_not_found", "no_open_access_pdf"}:
+            return "source_unavailable"
+        if "metadata-only" in reasoning.lower() or "quantitative" in reasoning.lower():
+            return "weak_support"
+        return "needs_user_review"
+    return status  # fallback
+
+
 def verdict_to_status(
     verdict,                              # llm.CitationAudit
     *,
@@ -660,6 +733,7 @@ async def audit_project(
         entry = bib_by_key.get(check.cite_key)
         if entry is None:
             check.status = "missing_in_bib"
+            check.issue_type = "missing_bib_entry"
             check.confidence = 1.0
             check.reasoning = (
                 f"no entry with this key in {this_bib.name}"
@@ -933,6 +1007,15 @@ async def audit_project(
             check.contradiction_type = verdict.contradiction_type
             check.claimed_value = verdict.claimed_value
             check.actual_value = verdict.actual_value
+        # Derive UI-friendly issue_type sub-classification.
+        check.issue_type = issue_type_for(
+            status,
+            degraded_reason=check.degraded_reason,
+            reasoning=reasoning,
+            paper_title=(content.title if content else (entry.get("title") or "")),
+            evidence_tier=check.evidence_tier,
+            contradiction_type=check.contradiction_type,
+        )
         if status == "unverifiable" and verdict.supports:
             dbg.trace(
                 "audit.safety",
