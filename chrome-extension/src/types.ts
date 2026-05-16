@@ -57,6 +57,7 @@ export interface EvidenceCandidate {
   paper_key: string;
   title: string;
   first_author: string;
+  authors: string[];
   year: number | null;
   venue: string;
   doi: string;
@@ -67,6 +68,10 @@ export interface EvidenceCandidate {
   has_pdf: boolean;
   spans: EvidenceSpan[];
   note: string;
+  /** Proper BibTeX cite key (e.g. "das2024confidence"). */
+  cite_key: string;
+  /** Ready-to-paste @type{...} BibTeX entry. */
+  bibtex: string;
 }
 
 export interface EvidenceReport {

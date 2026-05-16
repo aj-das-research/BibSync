@@ -257,13 +257,15 @@ function candidateCardHtml(cand: EvidenceCandidate, idx: number): string {
         <div class="ev-quote">${esc(s.quote ?? "")}</div></div>`;
     })
     .join("");
+  const key = cand.cite_key || "untitled";
   return `<div class="cand-card">
     <div class="cand-title">#${idx + 1} ${esc(cand.title)}</div>
     <div class="cand-meta">${author}${year} · ${esc(cand.venue || "—")} ${cited} · [${tier}]</div>
+    <div class="cand-key">\\cite{${esc(key)}}</div>
     ${spans}
     <div class="cand-actions">
       <button data-insert="${idx}">Insert \\cite</button>
-      <button data-copy-cite="${esc(cand.paper_key)}">Copy \\cite key</button>
+      <button data-copy-bibtex="${idx}">Copy BibTeX</button>
     </div>
   </div>`;
 }
@@ -822,12 +824,12 @@ async function handleInsert(idx: number): Promise<void> {
     setStatus("Couldn't read the editor.", true);
     return;
   }
-  // Insert after the selected text. The cite-key is the paper_key for now
-  // (a real bib entry append is a Sprint-G task — for now the user copies
-  // the BibTeX separately; this just places the \cite marker).
+  // Insert after the selected text using the PROPER cite key
+  // (firstauthor+year+titleword, e.g. das2024confidence) — never the
+  // internal paper_key cache id.
   const insertAt = lastSelection.end;
-  const citeKey = cand.paper_key.replace(/[^A-Za-z0-9_]/g, "");
-  await proposeEdit({
+  const citeKey = cand.cite_key || "untitled";
+  const ok = await proposeEdit({
     title: `Insert \\cite{${citeKey}}`,
     file: doc.file,
     fileContent: doc.text,
@@ -837,6 +839,16 @@ async function handleInsert(idx: number): Promise<void> {
     newText: `~\\cite{${citeKey}}`,
     reason: `cite ${cand.title}`,
   });
+  if (ok && cand.bibtex) {
+    // The \cite is in the .tex — but the .bib entry must exist too.
+    // Drop the entry on the clipboard so the user can paste it into
+    // their references.bib (a direct .bib append is a later task).
+    await navigator.clipboard.writeText(cand.bibtex);
+    setStatus(
+      `Inserted \\cite{${citeKey}}. The BibTeX entry is on your clipboard — ` +
+        `paste it into your .bib file.`,
+    );
+  }
 }
 
 // ── event wiring ─────────────────────────────────────────────────────────────
@@ -883,11 +895,14 @@ results.addEventListener("click", (e) => {
     }
     return;
   }
-  const copyKey = t.getAttribute("data-copy-cite");
-  if (copyKey) {
-    void navigator.clipboard.writeText(`\\cite{${copyKey}}`);
-    t.textContent = "Copied!";
-    setTimeout(() => (t.textContent = "Copy \\cite key"), 1500);
+  const copyBib = t.getAttribute("data-copy-bibtex");
+  if (copyBib) {
+    const cand = currentCandidates[Number(copyBib)];
+    if (cand?.bibtex) {
+      void navigator.clipboard.writeText(cand.bibtex);
+      t.textContent = "Copied!";
+      setTimeout(() => (t.textContent = "Copy BibTeX"), 1500);
+    }
     return;
   }
   const remove = t.getAttribute("data-remove");

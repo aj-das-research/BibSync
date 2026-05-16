@@ -40,6 +40,7 @@ class EvidenceCandidate:
     paper_key: str = ""
     title: str = ""
     first_author: str = ""
+    authors: list = field(default_factory=list)  # full author list
     year: Optional[int] = None
     venue: str = ""
     doi: str = ""
@@ -52,6 +53,11 @@ class EvidenceCandidate:
     has_pdf: bool = False
     spans: list = field(default_factory=list)  # list[dict] of EvidenceSpan
     note: str = ""             # error / status detail when no spans extracted
+    # A proper BibTeX cite key (firstauthor+year+titleword, e.g.
+    # "das2024confidence") + the ready-to-paste BibTeX entry. NOT the
+    # internal paper_key cache id.
+    cite_key: str = ""
+    bibtex: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -205,10 +211,22 @@ async def find_evidence_for_claim(
         pc = _parse_openalex_work(work)
         if pc is None:
             continue
+        # Proper BibTeX cite key + ready-to-paste entry — built from the
+        # resolved metadata, NOT the internal stable_key cache id.
+        from . import bibtex as bibtex_mod
+        cite_key, _entry, bibtex_text = bibtex_mod.build_entry_from_metadata(
+            title=pc.title,
+            authors=pc.authors or [],
+            year=pc.year,
+            venue=pc.venue or "",
+            doi=pc.doi or "",
+            arxiv_id=pc.arxiv_id or "",
+        )
         cand = EvidenceCandidate(
             paper_key=pc.stable_key(),
             title=pc.title,
             first_author=(pc.authors[0] if pc.authors else ""),
+            authors=list(pc.authors or []),
             year=pc.year,
             venue=pc.venue or "",
             doi=pc.doi or "",
@@ -218,6 +236,8 @@ async def find_evidence_for_claim(
             source="openalex",
             has_abstract=bool(pc.abstract),
             has_pdf=bool(pc.pdf_url),
+            cite_key=cite_key,
+            bibtex=bibtex_text,
         )
 
         # If we don't have abstract OR pdf, try the full fallback chain to

@@ -171,6 +171,12 @@ button.primary {
 .cand-meta { color: var(--muted); font-size: 11px; margin: 2px 0 6px; }
 .cand-actions { display: flex; gap: 6px; margin-top: 6px; }
 .cand-actions button { padding: 4px 8px; font-size: 11px; }
+.cand-key {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--accent);
+  margin: 3px 0;
+}
 
 /* ── footer ─────────────────────────────────────────── */
 #footer {

@@ -41,6 +41,63 @@ def derive_cite_key(entry: dict) -> str:
     return f"{surname}{year}{first_word}"
 
 
+def build_entry_from_metadata(
+    *,
+    title: str,
+    authors: list,
+    year: Optional[int] = None,
+    venue: str = "",
+    doi: str = "",
+    arxiv_id: str = "",
+) -> tuple[str, dict, str]:
+    """Build a proper BibTeX entry from resolved paper metadata.
+
+    Returns ``(cite_key, entry_dict, bibtex_text)``:
+      • ``cite_key`` — firstauthorsurname+year+firsttitleword
+        (e.g. ``das2024confidence``), NOT a mangled DOI.
+      • ``entry_dict`` — the parsed-entry shape used elsewhere.
+      • ``bibtex_text`` — the formatted ``@type{...}`` block, ready to
+        paste into a .bib file.
+
+    Entry type heuristic: arXiv-only → ``@article``; a venue containing
+    "conference"/"proceedings"/"lecture notes"/"workshop" → ``@inproceedings``
+    (LNCS / MICCAI / NeurIPS proceedings); otherwise ``@article``.
+    """
+    # authors → "Surname, Given and Surname, Given" BibTeX form.
+    author_field = " and ".join(a.strip() for a in (authors or []) if a.strip())
+
+    venue_l = (venue or "").lower()
+    is_proceedings = any(
+        kw in venue_l
+        for kw in ("conference", "proceedings", "lecture notes", "workshop", "symposium")
+    )
+    entry_type = "inproceedings" if is_proceedings else "article"
+
+    entry: dict = {
+        "ENTRYTYPE": entry_type,
+        "title": title or "",
+        "author": author_field,
+    }
+    if year:
+        entry["year"] = str(year)
+    if venue:
+        entry["booktitle" if entry_type == "inproceedings" else "journal"] = venue
+    if doi:
+        entry["doi"] = doi
+    if arxiv_id:
+        entry["eprint"] = arxiv_id
+        entry["archivePrefix"] = "arXiv"
+
+    cite_key = derive_cite_key(entry)
+    entry["ID"] = cite_key
+
+    # Format the @type{...} block via the standard writer (one-entry db).
+    db = BibDatabase()
+    db.entries = [entry]
+    bibtex_text = bibtexparser.dumps(db, writer=_writer()).strip()
+    return cite_key, entry, bibtex_text
+
+
 def _normalize_title(title: str) -> str:
     """Strip punctuation, lowercase, collapse whitespace — for fuzzy comparison only."""
     title = unicodedata.normalize("NFKD", title)
