@@ -23,6 +23,8 @@ bibsync bench show
 | `citation_verification.jsonl` | The labeled case set — one JSON object per line. |
 | `baseline-2026-05-15.json` | Snapshot at the start of the Tier-A sprint (before A1-A5). 18 cases. |
 | `sprint-A-final-2026-05-15.json` | Snapshot at the end of the Tier-A sprint. 20 cases. |
+| `sprint-B-final-2026-05-16.json` | Sprint B (memory + RAG upgrades). 20 cases, 85% accuracy. |
+| `sprint-C-final-2026-05-16.json` | **Sprint C (prompt strengthening + structured outputs). 20 cases, 100% accuracy.** |
 
 ## Schema (one case)
 
@@ -66,6 +68,23 @@ bibsync bench show
 | + M5 table-aware chunker (2053c88) | 20 | 85.0% | 0.0% | — | 4 BERT tables + 14 ResNet + 2 Vaswani extracted |
 | + M6 cross-encoder rerank (103c740) | 20 | 85.0% | 0.0% | 82.1s | precision↑ (1 false-positive → true-negative) |
 | + M7 claim-type routing (2c56258) | 20 | **85.0%** | **0.0%** | **68.8s** | **−16% wall clock; quality held** |
+
+### Sprint C — prompt strengthening + structured outputs for UI
+
+| Stage | Cases | Accuracy | FDR | Δ |
+|---|---:|---:|---:|---|
+| Sprint-B final (2c56258) | 20 | 85.0% | 0.0% | — |
+| + C1 survey-cited-as-original rule (334747a) | 20 | 87.5% | 0.0% | hallucinated-survey case fixed |
+| + C2 source-fetch-empty / fabricated guard (0de4496) | 20 | 90.0% | 0.0% | **+5pp, Sprint-C target hit** |
+| + C3 contradiction-detection checklist (142aa76) | 20 | 95.0% | 0.0% | **+5pp** |
+| + C4 structured contradiction payload (35e4891) | 20 | 95.0% | 0.0% | schema only |
+| + C5 issue_type taxonomy (ecdf25f) | 20 | 95.0% | 0.0% | UI-hint field |
+| + C6 evidence quote spans (0ce0645) | 20 | 95.0% | 0.0% | UI-quote field |
+| + C7 query decomposition (313edd4) | 20 | 95.0% | 0.0% | structural |
+| + C8 `bibsync evidence` (88e943c) | 20 | 95.0% | 0.0% | new command |
+| + C9 `bibsync source-rank` (94000e7) | 20 | 95.0% | 0.0% | new command |
+| + C10 OpenAlex graph in Filter C (23b0e07) | 20 | 95.0% | 0.0% | suggest-path improvement |
+| **+ C11 final benchmark** | 20 | **100.0%** ✅ | **0.0%** | **all 3 remaining failures closed** |
 
 **Headline (Sprint A + B):** baseline 77.8% → final 85.0% with **0% false-deletion rate throughout**. The safety metric (wrongly flagging a real citation as hallucinated) was never allowed to regress across either sprint.
 
