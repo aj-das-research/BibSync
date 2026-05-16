@@ -606,6 +606,7 @@ async def audit_project(
     ss_api_key: Optional[str] = None,
     per_dir_bib: bool = False,
     use_memory: bool = True,
+    memory_project_id: Optional[str] = None,
 ) -> AuditReport:
     """Audit every ``\\cite{}`` in ``project_root`` against the ``bib_file``.
 
@@ -698,8 +699,13 @@ async def audit_project(
     # at the same-or-higher tier. Writes capture each new verdict so the
     # next run can recall.
     from . import memory as memory_mod
+    # When a caller supplies an explicit memory_project_id (the server does,
+    # since its project_root is a throwaway temp dir), use it so memory
+    # persists across calls. The CLI leaves it None and hashes project_root.
     mem = memory_mod.open_memory(
-        project_root=project_root, enabled=use_memory, cache_dir=cache_dir,
+        project_root=project_root if memory_project_id is None else None,
+        project_id=memory_project_id,
+        enabled=use_memory, cache_dir=cache_dir,
     )
     dbg.trace(
         "audit.memory",

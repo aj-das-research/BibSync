@@ -95,6 +95,26 @@ export interface EvidenceReport {
   elapsed_sec: number;
 }
 
+// ── memory record (mirrors bibsync/memory.py MemoryRecord) ─────────────────
+
+export interface MemoryRecord {
+  id: string;
+  type: "accept" | "reject" | "verdict" | "preference" | "override" | "forgotten";
+  scope: "project" | "user";
+  ts: string;
+  claim_text: string;
+  claim_hash: string;
+  paper_key: string;
+  cite_key: string;
+  decision: string;
+  tier: number;
+  confidence: number;
+  source: string;
+  rationale: string;
+  tags: string[];
+  forgets: string;
+}
+
 // ── connection status ──────────────────────────────────────────────────────
 
 export type ConnectionState = "connecting" | "connected" | "disconnected" | "error";

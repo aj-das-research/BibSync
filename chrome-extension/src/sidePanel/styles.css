@@ -196,3 +196,90 @@ button.primary {
   padding: 24px 12px;
   font-size: 12px;
 }
+
+.muted { color: var(--muted); font-size: 11px; }
+
+/* ── tabs ───────────────────────────────────────────── */
+#tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.tab {
+  flex: 1;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 4px;
+  font-size: 12px;
+}
+.tab:hover { border-color: transparent; background: var(--panel); }
+.tab-active {
+  border-bottom-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.tab-view { display: block; }
+.tab-view[hidden] { display: none; }
+
+/* ── settings form ──────────────────────────────────── */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+.field > span { font-weight: 600; font-size: 12px; }
+.field select,
+.field input {
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--fg);
+}
+#set-status { min-height: 14px; }
+
+/* ── memory tab ─────────────────────────────────────── */
+.memory-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.memory-bar button { padding: 5px 10px; font-size: 11px; }
+
+.mem-record {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+  background: var(--panel);
+  font-size: 11px;
+}
+.mem-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 6px;
+}
+.mem-type {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.mem-type.t-verdict     { color: var(--accent); }
+.mem-type.t-accept      { color: var(--green); }
+.mem-type.t-reject      { color: var(--red); }
+.mem-type.t-preference  { color: var(--orange); }
+.mem-type.t-override    { color: var(--yellow); }
+.mem-decision { color: var(--fg); }
+.mem-claim { color: var(--muted); font-style: italic; margin: 3px 0; }
+.mem-ts { color: var(--muted); font-size: 10px; }
+.mem-forget {
+  padding: 2px 8px;
+  font-size: 10px;
+  border-radius: 4px;
+}

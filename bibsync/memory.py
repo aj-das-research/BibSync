@@ -175,8 +175,22 @@ class CitationMemory:
         cache_dir: Path,
         *,
         project_root: Optional[Path] = None,
+        project_id: Optional[str] = None,
         enabled: bool = True,
     ):
+        """Open a memory store.
+
+        The project namespace is resolved from EITHER:
+          • ``project_id`` — an explicit, caller-supplied stable string.
+            Used by the server, where the "project" is an Overleaf
+            project with no local filesystem path. Hashed for the
+            filename so arbitrary client strings stay filesystem-safe.
+          • ``project_root`` — a local directory; its absolute path is
+            sha1-hashed. Used by the CLI.
+
+        ``project_id`` wins if both are given. When neither is given,
+        only user-scoped memory is available.
+        """
         self.enabled = enabled
         self.dir = Path(cache_dir) / "memory"
         if enabled:
@@ -184,11 +198,17 @@ class CitationMemory:
         self.user_file = self.dir / "user.jsonl"
         self.project_id: Optional[str] = None
         self.project_file: Optional[Path] = None
-        if project_root is not None:
+        if project_id is not None:
+            # Hash the caller string so any client-supplied id is a safe,
+            # fixed-length filename (and doesn't leak the raw id on disk).
+            self.project_id = hashlib.sha1(
+                project_id.encode("utf-8")
+            ).hexdigest()[:16]
+        elif project_root is not None:
             self.project_id = _project_id(project_root)
-            if enabled:
-                (self.dir / "projects").mkdir(parents=True, exist_ok=True)
-                self.project_file = self.dir / "projects" / f"{self.project_id}.jsonl"
+        if self.project_id is not None and enabled:
+            (self.dir / "projects").mkdir(parents=True, exist_ok=True)
+            self.project_file = self.dir / "projects" / f"{self.project_id}.jsonl"
 
     # ── write paths ─────────────────────────────────────────────────────────
 
@@ -406,10 +426,16 @@ class CitationMemory:
 def open_memory(
     project_root: Optional[Path] = None,
     *,
+    project_id: Optional[str] = None,
     enabled: bool = True,
     cache_dir: Optional[Path] = None,
 ) -> CitationMemory:
     """Construct a ``CitationMemory`` with the default cache dir.
+
+    Pass ``project_id`` (an explicit stable string) when there's no
+    local directory to hash — e.g. the server, where the "project" is
+    an Overleaf project. ``project_id`` takes precedence over
+    ``project_root``.
 
     Pass ``enabled=False`` to satisfy callers' type contracts without
     persisting anything (used by ``--no-memory`` flags). All writes
@@ -423,4 +449,7 @@ def open_memory(
     # side-effect-free even on a fresh user account.
     if enabled:
         cache_dir.mkdir(parents=True, exist_ok=True)
-    return CitationMemory(cache_dir, project_root=project_root, enabled=enabled)
+    return CitationMemory(
+        cache_dir, project_root=project_root,
+        project_id=project_id, enabled=enabled,
+    )

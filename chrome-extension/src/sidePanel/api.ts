@@ -15,6 +15,7 @@ import type {
   EditorSelection,
   EvidenceReport,
   HealthInfo,
+  MemoryRecord,
   NativeResponse,
 } from "../types";
 
@@ -58,16 +59,19 @@ export async function auditSelection(args: {
   bibContent?: string;
   tier: number;
   ragTopK: number;
+  embeddingBackend: string;
+  projectId: string;
 }): Promise<AuditReport> {
   const resp = await viaWorker({
     method: "POST",
     path: "/audit",
     body: {
-      project_id: "overleaf-extension",
+      project_id: args.projectId,
       tex_files: { [args.file]: args.texContent },
       bib_files: args.bibContent ? { "references.bib": args.bibContent } : {},
       tier: args.tier,
       rag_top_k: args.ragTopK,
+      embedding_backend: args.embeddingBackend,
       use_memory: true,
     },
   });
@@ -75,6 +79,41 @@ export async function auditSelection(args: {
     throw new Error(resp.error ?? `audit failed (status ${resp.status})`);
   }
   return resp.body as AuditReport;
+}
+
+// ── memory ──────────────────────────────────────────────────────────────────
+
+/** GET /memory — list records for the given Overleaf project. */
+export async function getMemory(projectId: string): Promise<{
+  records: MemoryRecord[];
+  total: number;
+}> {
+  const resp = await viaWorker({
+    method: "GET",
+    path: "/memory",
+    query: { project_id: projectId, scope: "all", limit: "200" },
+  });
+  if (!resp.ok) {
+    throw new Error(resp.error ?? `memory query failed (status ${resp.status})`);
+  }
+  return resp.body as { records: MemoryRecord[]; total: number };
+}
+
+/** POST /memory/forget — tombstone a record by id. */
+export async function forgetMemory(
+  recordId: string,
+  scope: "project" | "user",
+  projectId: string,
+): Promise<boolean> {
+  const resp = await viaWorker({
+    method: "POST",
+    path: "/memory/forget",
+    body: { record_id: recordId, scope, project_id: projectId },
+  });
+  if (!resp.ok) {
+    throw new Error(resp.error ?? `forget failed (status ${resp.status})`);
+  }
+  return Boolean((resp.body as { ok?: boolean })?.ok);
 }
 
 /** POST /evidence — find supporting papers for a free-form claim. */
@@ -140,4 +179,20 @@ export async function isOverleafTab(): Promise<boolean> {
 async function activeTab(): Promise<chrome.tabs.Tab | undefined> {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   return tabs[0];
+}
+
+/**
+ * Stable project identity for memory scoping.
+ *
+ * Overleaf project URLs are `overleaf.com/project/<24-hex-id>`. That hex
+ * ID is a perfect stable key — the same project across sessions yields
+ * the same `project_id`, so memory recall works. Falls back to a
+ * generic id when the URL isn't an Overleaf project page (e.g. the
+ * panel is open on a non-Overleaf tab).
+ */
+export async function getOverleafProjectId(): Promise<string> {
+  const tab = await activeTab();
+  const url = tab?.url ?? "";
+  const m = url.match(/overleaf\.com\/project\/([a-f0-9]+)/i);
+  return m ? `overleaf:${m[1]}` : "overleaf:unknown";
 }

@@ -96,6 +96,7 @@ try:
         record_id: str
         scope: str = "project"
         project_root: Optional[str] = None
+        project_id: Optional[str] = None
 
     class MemoryPurgeRequest(BaseModel):
         project_root: str
@@ -145,6 +146,7 @@ async def _audit_inline(
     rag_top_k: int = 5,
     embedding_backend: str = "auto",
     use_memory: bool = True,
+    project_id: str = "",
     api_key: str,
 ) -> dict:
     """Write the inline tex/bib content to a temp directory and run
@@ -180,6 +182,10 @@ async def _audit_inline(
             tier=tier, rag_top_k=rag_top_k,
             embedding_backend=embedding_backend,
             api_key=api_key, use_memory=use_memory,
+            # Pass the client's stable project_id so memory persists
+            # across calls — the temp `root` would otherwise give every
+            # request a fresh, useless namespace.
+            memory_project_id=project_id or None,
         )
     return report.to_dict()
 
@@ -258,7 +264,8 @@ def create_app(*, token: Optional[str] = None):
             tex_files=req.tex_files, bib_files=req.bib_files,
             tier=req.tier, rag_top_k=req.rag_top_k,
             embedding_backend=req.embedding_backend,
-            use_memory=req.use_memory, api_key=llm_cfg.api_key,
+            use_memory=req.use_memory, project_id=req.project_id,
+            api_key=llm_cfg.api_key,
         )
 
     @app.post("/evidence", dependencies=[_Depends(require_auth)])
@@ -307,12 +314,14 @@ def create_app(*, token: Optional[str] = None):
 
     @app.get("/memory", dependencies=[_Depends(require_auth)])
     def get_memory(project_root: Optional[str] = None,
+                   project_id: Optional[str] = None,
                    scope: str = "all", type: Optional[str] = None,
                    limit: int = 200) -> dict:
-        """List memory records for a project (or just user-scoped)."""
+        """List memory records. Scope by ``project_id`` (extension /
+        server clients) or ``project_root`` (CLI-style path)."""
         from . import memory as mem_mod
         pr = Path(project_root) if project_root else None
-        mem = mem_mod.open_memory(project_root=pr)
+        mem = mem_mod.open_memory(project_root=pr, project_id=project_id)
         if scope == "all":
             records = mem.all_records()
         else:
@@ -329,14 +338,17 @@ def create_app(*, token: Optional[str] = None):
     def post_memory_forget(req: MemoryForgetRequest) -> dict:
         from . import memory as mem_mod
         pr = Path(req.project_root) if req.project_root else None
-        mem = mem_mod.open_memory(project_root=pr)
+        mem = mem_mod.open_memory(project_root=pr, project_id=req.project_id)
         ok = mem.forget(req.record_id, scope=req.scope)  # type: ignore[arg-type]
         return {"ok": ok, "record_id": req.record_id}
 
     @app.delete("/memory/project", dependencies=[_Depends(require_auth)])
-    def delete_memory_project(project_root: str) -> dict:
+    def delete_memory_project(
+        project_root: Optional[str] = None, project_id: Optional[str] = None,
+    ) -> dict:
         from . import memory as mem_mod
-        mem = mem_mod.open_memory(project_root=Path(project_root))
+        pr = Path(project_root) if project_root else None
+        mem = mem_mod.open_memory(project_root=pr, project_id=project_id)
         return {"ok": mem.purge_project(), "project_id": mem.project_id}
 
     @app.get("/cache/status", dependencies=[_Depends(require_auth)])
@@ -387,12 +399,15 @@ def create_app(*, token: Optional[str] = None):
         return {"ok": True, "cleared": n, "target": target}
 
     @app.get("/privacy", dependencies=[_Depends(require_auth)])
-    def get_privacy(project_root: Optional[str] = None) -> dict:
+    def get_privacy(
+        project_root: Optional[str] = None, project_id: Optional[str] = None,
+    ) -> dict:
         """What persistent data does BibSync hold for this project?"""
         from . import memory as mem_mod
         pr = Path(project_root) if project_root else None
-        mem = mem_mod.open_memory(project_root=pr)
-        project_records = mem.all_records(scope="project") if pr else []
+        mem = mem_mod.open_memory(project_root=pr, project_id=project_id)
+        has_project = pr is not None or project_id is not None
+        project_records = mem.all_records(scope="project") if has_project else []
         user_records = mem.all_records(scope="user")
         return {
             "project_root": str(pr) if pr else None,

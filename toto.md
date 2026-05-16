@@ -39,7 +39,7 @@ Each task carries a numeric ID (`C1`, `D3`, …). Inter-task dependencies are no
 |---|---|---|---|
 | **C** | Stabilise core | Close benchmark failures, structure outputs for UI consumption | `[x]` ✅ **100% accuracy / 0% FDR** |
 | **D** | Local server + patch layer | `bibsync serve` + patch model; non-browser clients can drive the AI | `[x]` ✅ **12 endpoints, 12/12 tests pass** |
-| **E** | Chrome read-only | Side panel that displays issues, evidence, and suggested citations | `[~]` MVP shipped — Check/Find/issue-cards/evidence/connection live; Settings+Memory tabs deferred |
+| **E** | Chrome read-only | Side panel that displays issues, evidence, and suggested citations | `[x]` ✅ all 14 tasks — Check/Memory/Settings tabs live |
 | **F** | User-approved edits | Insert/replace/append actions with undo + conflict detection | `[ ]` |
 | **G** | Project-level | Full-project audit, multi-file BibTeX, batch review | `[ ]` |
 
@@ -410,10 +410,10 @@ Captured here so the plan is self-grounded.
 - [x] **Description**: Clipboard-only actions. User pastes manually into Overleaf. Bridges Sprint E (read-only) to Sprint F (auto-insert) — proves the AI is useful before risking edit corruption.
 
 ### E12 · Settings tab
-- [ ] **Description**: Choose embedding backend (auto/local/api), tier (0/1/2), reranker on/off. Persists to `chrome.storage.local`.
+- [x] **Description**: Choose embedding backend (auto/local/api), tier (0/1/2), reranker on/off. Persists to `chrome.storage.local`.
 
 ### E13 · Memory tab
-- [ ] **Description**: Lists memory records for the current project (calls `/memory`). Forget button per record.
+- [x] **Description**: Lists memory records for the current project (calls `/memory`). Forget button per record.
 
 ### E14 · Connection status indicator
 - [x] **Description**: Header bar shows "Connected to BibSync" (green) / "BibSync not running" (red) based on `/health` polling every 30s. Click → run `bibsync serve` instructions modal.

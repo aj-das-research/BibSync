@@ -15,15 +15,56 @@
       </span>
     </header>
 
+    <nav id="tabs">
+      <button class="tab tab-active" data-tab="check">Check</button>
+      <button class="tab" data-tab="memory">Memory</button>
+      <button class="tab" data-tab="settings">Settings</button>
+    </nav>
+
     <main id="main">
-      <section id="actions">
-        <button id="btn-check" class="primary">Check selected text</button>
-        <button id="btn-evidence">Find citation for selection</button>
+      <!-- ── Check tab ─────────────────────────────────────── -->
+      <section class="tab-view" data-view="check">
+        <div id="actions">
+          <button id="btn-check" class="primary">Check selected text</button>
+          <button id="btn-evidence">Find citation for selection</button>
+        </div>
+        <div id="status-line" class="status-line"></div>
+        <div id="results"></div>
       </section>
 
-      <section id="status-line" class="status-line"></section>
+      <!-- ── Memory tab ────────────────────────────────────── -->
+      <section class="tab-view" data-view="memory" hidden>
+        <div class="memory-bar">
+          <button id="btn-memory-refresh">Refresh</button>
+          <span id="memory-count" class="muted"></span>
+        </div>
+        <div id="memory-list"></div>
+      </section>
 
-      <section id="results"></section>
+      <!-- ── Settings tab ──────────────────────────────────── -->
+      <section class="tab-view" data-view="settings" hidden>
+        <label class="field">
+          <span>Evidence tier</span>
+          <select id="set-tier">
+            <option value="0">0 — metadata only (fastest)</option>
+            <option value="1">1 — + abstract</option>
+            <option value="2">2 — + full-text RAG (most thorough)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Embedding backend</span>
+          <select id="set-backend">
+            <option value="auto">auto (local if available)</option>
+            <option value="local">local (fastembed)</option>
+            <option value="api">api (OpenRouter / OpenAI)</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>RAG chunks (top-k)</span>
+          <input id="set-topk" type="number" min="1" max="20" />
+        </label>
+        <div id="set-status" class="muted"></div>
+      </section>
     </main>
 
     <footer id="footer">

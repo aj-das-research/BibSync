@@ -96,11 +96,23 @@ host reads automatically.
 | "Couldn't read the Overleaf editor" | Click into the editor pane first; reload the Overleaf tab |
 | Native host log | `~/Library/Logs/bibsync-native-host.log` (macOS) |
 
+## Tabs
+
+| Tab | What it does |
+|---|---|
+| **Check** | Audit the current file's `\cite{}` calls; find citations for a selection |
+| **Memory** | Inspect / forget the decisions BibSync has stored for this Overleaf project |
+| **Settings** | Evidence tier (0/1/2), embedding backend, RAG top-k — persisted in `chrome.storage.local` |
+
+Memory is scoped per Overleaf project: the project ID in the URL
+(`overleaf.com/project/<id>`) is the memory namespace key, so re-running
+Check on the same project recalls prior verdicts instead of re-calling
+the LLM.
+
 ## What's NOT in this build (Sprint F / G)
 
 - Applying edits (insert / replace / append BibTeX) — patch model exists
   server-side; the UI gate is Sprint F.
-- Settings + Memory tabs.
 - Full-project audit + batch review (Sprint G).
 
 ## Development
