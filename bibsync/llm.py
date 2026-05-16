@@ -861,6 +861,31 @@ Heuristic priority: A and B together are STRONG accept signals — when a paper 
 both high citation count and clear topic match, accept even if the title doesn't
 contain the named system literally. When in doubt with cited_by ≥ 500, ACCEPT.
 
+OPENALEX CITATION-GRAPH SIGNALS (when provided in the user message)
+═════════════════════════════════════════════════════════════════════
+The user message may include an OPENALEX SIGNALS block with structured
+data not in the Scholar metadata:
+
+  • ``openalex_cited_by`` — OpenAlex citation count. Usually similar to
+    Scholar's cited_by but sometimes notably different (OpenAlex misses
+    grey-lit citations, Scholar overcounts). Trust the HIGHER of the
+    two when scoring canonicality.
+  • ``n_references`` — how many papers this work cites. A paper with
+    100+ references and few citations is almost certainly a survey or
+    review; treat it like rule Y. A paper with 30-50 references and
+    high cited_by is usually an original contribution.
+  • ``is_survey_title=true`` — the title pattern-matches surveys/
+    reviews/tutorials. Even if cited_by is high, this is a STRONG
+    signal that Rule Y fires (the paper is ABOUT X, not the original
+    of X). Set supports=false unless the claim itself is about the
+    survey (e.g. "Smith 2022 reviews attention mechanisms").
+  • ``openalex_doi`` / ``openalex_arxiv_id`` — exact identifiers when
+    available; treat as supporting evidence the paper is real and
+    well-indexed.
+
+Use these signals to ESCAPE the trap where Scholar's cited_by + topic
+match falsely accept a popular SURVEY paper as the original of a method.
+
 Return a single JSON object:
   {
     "supports": true | false,
@@ -877,6 +902,7 @@ def verify_claim_support(
     *,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    canonicality_signals: Optional[dict] = None,
 ) -> ClaimSupport:
     """LLM-as-judge: does this Scholar candidate actually support the prose claim?
 
@@ -905,17 +931,39 @@ def verify_claim_support(
         cand_cited=candidate.cited_by,
     )
 
-    user_msg = (
-        "Does the CANDIDATE paper support the CLAIM? Return JSON.\n\n"
-        f"CLAIM (anchor in prose):\n  {claim_text!r}\n\n"
-        f"CONTEXT (surrounding paragraph):\n  {context!r}\n\n"
-        "CANDIDATE from Google Scholar:\n"
-        f"  title:                {candidate.title!r}\n"
-        f"  first_author_surname: {cand_surname!r}\n"
-        f"  year:                 {candidate.year}\n"
-        f"  venue:                {(candidate.venue or '')!r}\n"
-        f"  cited_by:             {candidate.cited_by}\n"
-    )
+    user_parts = [
+        "Does the CANDIDATE paper support the CLAIM? Return JSON.\n",
+        f"CLAIM (anchor in prose):\n  {claim_text!r}\n",
+        f"CONTEXT (surrounding paragraph):\n  {context!r}\n",
+        "CANDIDATE from Google Scholar:",
+        f"  title:                {candidate.title!r}",
+        f"  first_author_surname: {cand_surname!r}",
+        f"  year:                 {candidate.year}",
+        f"  venue:                {(candidate.venue or '')!r}",
+        f"  cited_by:             {candidate.cited_by}",
+    ]
+    # Optional OpenAlex citation-graph signals — fed straight to the LLM so it
+    # has more canonicality evidence than just the Scholar metadata.
+    # See _CLAIM_SUPPORT_SYSTEM for how the LLM is told to use them.
+    if canonicality_signals:
+        user_parts.append("\nOPENALEX SIGNALS (canonicality evidence):")
+        if "openalex_cited_by" in canonicality_signals:
+            user_parts.append(f"  openalex_cited_by:    {canonicality_signals['openalex_cited_by']}")
+        if "n_references" in canonicality_signals:
+            user_parts.append(
+                f"  n_references:         {canonicality_signals['n_references']}  "
+                f"(papers this work cites)"
+            )
+        if canonicality_signals.get("is_survey_title"):
+            user_parts.append(
+                "  is_survey_title:      true   ← title matches survey/review/"
+                "tutorial pattern; apply Rule Y from the system prompt"
+            )
+        if canonicality_signals.get("openalex_doi"):
+            user_parts.append(f"  openalex_doi:         {canonicality_signals['openalex_doi']}")
+        if canonicality_signals.get("openalex_arxiv_id"):
+            user_parts.append(f"  openalex_arxiv_id:    {canonicality_signals['openalex_arxiv_id']}")
+    user_msg = "\n".join(user_parts)
 
     try:
         resp = client.chat.completions.create(

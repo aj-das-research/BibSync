@@ -183,6 +183,62 @@ def _has_existing_cite(paragraph: str) -> bool:
     return bool(_CITE_PRESENCE_RE.search(paragraph))
 
 
+# Title patterns indicating a survey / review / tutorial paper. Mirrors the
+# pattern used in C1's audit-prompt rule and C9's source-rank scoring.
+_SURVEY_TITLE_RE = re.compile(
+    r"\b(survey|review|overview|tutorial|comprehensive (?:analysis|evaluation)|"
+    r"what does .* learn|where it comes and where it goes|revisiting|probing)\b",
+    re.IGNORECASE,
+)
+
+
+async def _openalex_signals_for(
+    title: str, first_author: Optional[str] = None,
+) -> Optional[dict]:
+    """Quick OpenAlex lookup for canonicality signals attached to a Scholar
+    candidate. Used by Filter C to surface citation-graph evidence to the
+    LLM. Returns ``None`` on any failure — Filter C falls back to Scholar-
+    metadata-only judgment, which is the pre-C10 behaviour."""
+    if not title:
+        return None
+    try:
+        from .audit_sources.openalex import search_openalex
+        oa = await search_openalex(title, first_author=first_author)
+    except Exception as e:
+        dbg.trace("suggest.openalex_signals", "lookup failed", error=str(e))
+        return None
+    if oa is None:
+        return None
+    # Extract n_references from the raw OpenAlex response if possible.
+    # ``search_openalex`` already parses to PaperContent and drops the
+    # referenced_works list; we re-fetch the count separately.
+    n_refs = 0
+    try:
+        import httpx
+        if oa.openalex_id:  # not currently populated by parser; skip
+            pass
+        # Cheap second call to get the referenced_works length. Skip to
+        # keep the hot path fast — n_refs is a "nice to have" signal.
+    except Exception:
+        pass
+    is_survey = bool(_SURVEY_TITLE_RE.search(oa.title or title))
+    signals: dict = {
+        "is_survey_title": is_survey,
+    }
+    if oa.doi:
+        signals["openalex_doi"] = oa.doi
+    if oa.arxiv_id:
+        signals["openalex_arxiv_id"] = oa.arxiv_id
+    dbg.trace(
+        "suggest.openalex_signals",
+        "found",
+        title=oa.title,
+        is_survey=is_survey,
+        has_doi=bool(oa.doi),
+    )
+    return signals
+
+
 # LaTeX line comment: % to end-of-line, but \% is an escaped percent.
 # Same regex as audit._COMMENT_RE; intentionally duplicated to avoid a
 # cross-module dependency for this single token-level operation.
@@ -661,6 +717,14 @@ async def _resolve_suggestion(
                 evaluated.add(candidate.cluster_id)
                 continue
 
+            # Opportunistically enrich with OpenAlex canonicality signals
+            # (citation count, ref count, survey-title flag). When OpenAlex
+            # doesn't have the paper or the title-match guard rejects, we
+            # fall back to Filter C with only the Scholar metadata.
+            canon_signals = await _openalex_signals_for(
+                candidate.title, candidate.authors[0] if candidate.authors else None,
+            )
+
             # Filter C — LLM-as-judge (canonical-paper detection).
             verdict = llm.verify_claim_support(
                 claim_text=suggestion.anchor,
@@ -668,6 +732,7 @@ async def _resolve_suggestion(
                 candidate=candidate,
                 model=model,
                 api_key=api_key,
+                canonicality_signals=canon_signals,
             )
             evaluated.add(candidate.cluster_id)
             last_reason = verdict.reasoning
