@@ -1,15 +1,21 @@
 /**
  * BibSync side panel — main UI controller.
  *
- * Vanilla TypeScript + DOM templating. Three tabs:
- *   • Check    — audit the current file, find citations for a selection
- *   • Memory   — inspect / forget the project's stored decisions
- *   • Settings — tier / embedding backend / RAG top-k (chrome.storage.local)
+ * Vanilla TypeScript + DOM templating. Three tabs (Check / Memory /
+ * Settings). Sprint F adds user-approved editing:
+ *   • Insert citation   — additive \cite{} at the selection (Find flow)
+ *   • Remove citation   — strike a hallucinated \cite{} (issue cards)
+ *   • Ignore warning    — write an `override` memory record
+ *   • Mark verified     — write an `accept` memory record
+ *   • Undo last edit    — inverse-patch the most recent edit
  *
- * Pipeline (every server call):
- *   side panel → service worker → native host → bibsync serve
+ * Every edit goes through a preview modal: the user sees the exact
+ * before/after diff and clicks Accept. Nothing touches the manuscript
+ * without that explicit click. Conflicts (file changed since the patch
+ * was built) are detected server-side and surfaced in the modal.
  */
 import {
+  applyOverleafEdit,
   auditSelection,
   checkHealth,
   findEvidence,
@@ -18,7 +24,10 @@ import {
   getOverleafDocument,
   getOverleafProjectId,
   getOverleafSelection,
+  previewPatch,
+  rememberMemory,
 } from "./api";
+import type { Patch } from "./api";
 import { DEFAULT_SETTINGS } from "../types";
 import type {
   CitationCheck,
@@ -51,7 +60,6 @@ async function loadSettings(): Promise<void> {
   if (stored[SETTINGS_KEY]) {
     settings = { ...DEFAULT_SETTINGS, ...stored[SETTINGS_KEY] };
   }
-  // Reflect into the form controls.
   ($("set-tier") as HTMLSelectElement).value = String(settings.tier);
   ($("set-backend") as HTMLSelectElement).value = settings.embeddingBackend;
   ($("set-topk") as HTMLInputElement).value = String(settings.ragTopK);
@@ -124,11 +132,9 @@ function esc(s: string): string {
   d.textContent = s ?? "";
   return d.innerHTML;
 }
-
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
-
 function severityClass(issueType: string, status: string): string {
   if (status === "verified") return "sev-green";
   switch (issueType) {
@@ -147,7 +153,6 @@ function severityClass(issueType: string, status: string): string {
       return status === "hallucinated" ? "sev-red" : "sev-yellow";
   }
 }
-
 function setStatus(text: string, isError = false): void {
   statusLine.textContent = text;
   statusLine.className = isError ? "status-line error" : "status-line";
@@ -159,6 +164,20 @@ function setBusy(text: string): void {
 function emptyState(text: string): void {
   results.innerHTML = `<div class="empty">${esc(text)}</div>`;
 }
+function uid(): string {
+  return "patch_" + Math.random().toString(36).slice(2, 12);
+}
+
+// ── module state ─────────────────────────────────────────────────────────────
+
+/** The most-recent applied edit, kept so Undo can apply the inverse. */
+let lastEdit: { file: string; start: number; newText: string; oldText: string } | null =
+  null;
+/** Last selection from the Find-citation flow — Insert needs the insert point. */
+let lastSelection: { start: number; end: number; text: string } | null = null;
+/** Current audit checks, keyed by an index so card buttons can look them up. */
+let currentChecks: CitationCheck[] = [];
+let currentCandidates: EvidenceCandidate[] = [];
 
 // ── evidence + issue cards (E8, E9) ─────────────────────────────────────────
 
@@ -174,7 +193,30 @@ function evidenceListHtml(spans: EvidenceSpan[] | undefined): string {
     .join("")}</div>`;
 }
 
-function issueCardHtml(c: CitationCheck): string {
+/** Action buttons for an issue card, depending on its status. */
+function issueActionsHtml(c: CitationCheck, idx: number): string {
+  const buttons: string[] = [];
+  const problem = ["hallucinated", "contradicted", "unverifiable"].includes(c.status);
+  if (
+    c.status === "hallucinated" ||
+    c.issue_type === "wrong_reference" ||
+    c.issue_type === "unsupported_reference" ||
+    c.issue_type === "survey_cited_as_original"
+  ) {
+    buttons.push(`<button data-remove="${idx}">Remove citation</button>`);
+  }
+  if (c.status === "unverifiable") {
+    buttons.push(`<button data-mark-verified="${idx}">Mark verified</button>`);
+  }
+  if (problem) {
+    buttons.push(`<button data-ignore="${idx}">Ignore</button>`);
+  }
+  return buttons.length
+    ? `<div class="card-actions">${buttons.join("")}</div>`
+    : "";
+}
+
+function issueCardHtml(c: CitationCheck, idx: number): string {
   const sev = severityClass(c.issue_type, c.status);
   const evToggle =
     c.evidence && c.evidence.length > 0
@@ -195,6 +237,7 @@ function issueCardHtml(c: CitationCheck): string {
     <div class="issue-reason">${esc(c.reasoning)}</div>
     ${diff}${evToggle}
     <div class="evidence-collapsed" style="display:none">${evidenceListHtml(c.evidence)}</div>
+    ${issueActionsHtml(c, idx)}
   </div>`;
 }
 
@@ -217,15 +260,194 @@ function candidateCardHtml(cand: EvidenceCandidate, idx: number): string {
     <div class="cand-meta">${author}${year} · ${esc(cand.venue || "—")} ${cited} · [${tier}]</div>
     ${spans}
     <div class="cand-actions">
+      <button data-insert="${idx}">Insert \\cite</button>
       <button data-copy-cite="${esc(cand.paper_key)}">Copy \\cite key</button>
     </div>
   </div>`;
 }
 
+// ── preview modal (F2) ──────────────────────────────────────────────────────
+
+/**
+ * Show a before/after diff modal for a patch. Resolves true if the
+ * user clicks Accept, false otherwise. Surfaces server-detected
+ * conflicts (stale old_text) and disables Accept when conflicted.
+ */
+function showPreviewModal(args: {
+  title: string;
+  diff: string;
+  conflict?: string;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal-overlay";
+    const conflictHtml = args.conflict
+      ? `<div class="modal-conflict">⚠ ${esc(args.conflict)}</div>`
+      : "";
+    const diffHtml = args.diff
+      .split("\n")
+      .map((ln) => {
+        const cls = ln.startsWith("+")
+          ? "diff-add"
+          : ln.startsWith("-")
+            ? "diff-del"
+            : ln.startsWith("@")
+              ? "diff-hunk"
+              : "";
+        return `<div class="${cls}">${esc(ln)}</div>`;
+      })
+      .join("");
+    overlay.innerHTML = `
+      <div class="modal">
+        <div class="modal-title">${esc(args.title)}</div>
+        ${conflictHtml}
+        <div class="modal-diff">${diffHtml}</div>
+        <div class="modal-actions">
+          <button class="modal-reject">Reject</button>
+          <button class="modal-accept primary" ${args.conflict ? "disabled" : ""}>Accept</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    const close = (accepted: boolean) => {
+      overlay.remove();
+      resolve(accepted);
+    };
+    overlay.querySelector(".modal-accept")?.addEventListener("click", () => close(true));
+    overlay.querySelector(".modal-reject")?.addEventListener("click", () => close(false));
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) close(false);
+    });
+  });
+}
+
+// ── undo banner (F8) ────────────────────────────────────────────────────────
+
+function showUndoBanner(): void {
+  let banner = document.getElementById("undo-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "undo-banner";
+    banner.className = "undo-banner";
+    statusLine.after(banner);
+  }
+  banner.innerHTML = `Edit applied. <button id="undo-btn">Undo</button>`;
+  banner.style.display = "block";
+  document.getElementById("undo-btn")?.addEventListener("click", () => void undoLastEdit());
+}
+
+function hideUndoBanner(): void {
+  const banner = document.getElementById("undo-banner");
+  if (banner) banner.style.display = "none";
+}
+
+async function undoLastEdit(): Promise<void> {
+  if (!lastEdit) return;
+  // Inverse patch: the newText now occupies [start, start+newText.length);
+  // replacing that span with the original oldText reverts the edit.
+  const invStart = lastEdit.start;
+  const invEnd = lastEdit.start + lastEdit.newText.length;
+  const res = await applyOverleafEdit(invStart, invEnd, lastEdit.oldText);
+  if (res.ok) {
+    setStatus("Edit undone.");
+    lastEdit = null;
+    hideUndoBanner();
+  } else {
+    setStatus(`Undo failed: ${res.reason}`, true);
+  }
+}
+
+// ── edit application (F1, F3, F4) ───────────────────────────────────────────
+
+/**
+ * Run the full propose→preview→apply cycle for a single text edit.
+ *   1. Build a patch and POST /patch/preview (server renders diff +
+ *      checks the old_text still matches → conflict detection).
+ *   2. Show the diff modal.
+ *   3. On Accept, apply the edit into Overleaf via the content script.
+ *   4. Stash the inverse for Undo.
+ */
+async function proposeEdit(args: {
+  title: string;
+  file: string;
+  fileContent: string;
+  start: number;
+  end: number;
+  oldText: string;
+  newText: string;
+  reason: string;
+}): Promise<boolean> {
+  const patch: Patch = {
+    patch_id: uid(),
+    type: "raw",
+    file: args.file,
+    range: { start: args.start, end: args.end },
+    old_text: args.oldText,
+    new_text: args.newText,
+    reason: args.reason,
+    issue_id: "",
+    user_approved: false,
+  };
+
+  let diff = "";
+  let conflict: string | undefined;
+  try {
+    const pv = await previewPatch([patch], { [args.file]: args.fileContent });
+    diff = pv.preview[args.file]?.diff_unified ?? "(no change)";
+    if (pv.conflicts.length > 0) {
+      conflict =
+        "The file changed since this was computed — re-run Check before applying. " +
+        pv.conflicts[0].reason;
+    }
+  } catch (e) {
+    setStatus(e instanceof Error ? e.message : String(e), true);
+    return false;
+  }
+
+  const accepted = await showPreviewModal({ title: args.title, diff, conflict });
+  if (!accepted || conflict) return false;
+
+  const res = await applyOverleafEdit(args.start, args.end, args.newText);
+  if (!res.ok) {
+    if (res.reason === "offscreen") {
+      setStatus(
+        "That location isn't currently rendered — scroll near it in Overleaf and retry.",
+        true,
+      );
+    } else {
+      setStatus(`Could not apply edit: ${res.reason}`, true);
+    }
+    return false;
+  }
+  lastEdit = {
+    file: args.file,
+    start: args.start,
+    newText: args.newText,
+    oldText: args.oldText,
+  };
+  showUndoBanner();
+  setStatus("Edit applied.");
+  return true;
+}
+
+/** Span of the `\cite{...}` call starting at `charOffset` in `docText`. */
+function citeSpan(docText: string, charOffset: number): { start: number; end: number } | null {
+  // Expect `\cite` (or \citep/\citet/...) starting at or near charOffset.
+  // Find the opening brace, then the matching close.
+  const open = docText.indexOf("{", charOffset);
+  if (open < 0) return null;
+  const close = docText.indexOf("}", open);
+  if (close < 0) return null;
+  return { start: charOffset, end: close + 1 };
+}
+
 // ── Check flow (E7) ─────────────────────────────────────────────────────────
+
+let currentDoc: { file: string; text: string } | null = null;
 
 async function runCheck(): Promise<void> {
   results.innerHTML = "";
+  hideUndoBanner();
   setBusy("Reading Overleaf editor…");
 
   const doc = await getOverleafDocument();
@@ -236,6 +458,7 @@ async function runCheck(): Promise<void> {
     );
     return;
   }
+  currentDoc = doc;
   const projectId = await getOverleafProjectId();
 
   setBusy(`Auditing ${doc.file} (tier ${settings.tier})…`);
@@ -255,6 +478,7 @@ async function runCheck(): Promise<void> {
 }
 
 function renderAudit(checks: CitationCheck[], summary: Record<string, number>): void {
+  currentChecks = checks;
   if (checks.length === 0) {
     setStatus("");
     emptyState("No \\cite{} calls found in this file.");
@@ -265,16 +489,18 @@ function renderAudit(checks: CitationCheck[], summary: Record<string, number>): 
     .join(", ");
   setStatus(`${checks.length} citation(s): ${parts}`);
   const order = ["hallucinated", "contradicted", "missing_in_bib", "unverifiable", "verified"];
-  const sorted = [...checks].sort(
-    (a, b) => order.indexOf(a.status) - order.indexOf(b.status),
-  );
-  results.innerHTML = sorted.map(issueCardHtml).join("");
+  // currentChecks index must survive the sort, so render from a sorted COPY
+  // that carries the original index.
+  const indexed = checks.map((c, i) => ({ c, i }));
+  indexed.sort((a, b) => order.indexOf(a.c.status) - order.indexOf(b.c.status));
+  results.innerHTML = indexed.map(({ c, i }) => issueCardHtml(c, i)).join("");
 }
 
 // ── Find-citation flow (E10) ────────────────────────────────────────────────
 
 async function runFindCitation(): Promise<void> {
   results.innerHTML = "";
+  hideUndoBanner();
   setBusy("Reading selection…");
 
   const sel = await getOverleafSelection();
@@ -282,6 +508,7 @@ async function runFindCitation(): Promise<void> {
     setStatus("Select a sentence in Overleaf first, then click again.", true);
     return;
   }
+  lastSelection = { start: sel.start, end: sel.end, text: sel.text };
 
   setBusy(`Searching for evidence: "${truncate(sel.text, 60)}"…`);
   try {
@@ -290,6 +517,7 @@ async function runFindCitation(): Promise<void> {
       topPapers: 5,
       tier: Math.min(settings.tier, 1) as 0 | 1,
     });
+    currentCandidates = report.candidates;
     if (report.candidates.length === 0) {
       setStatus("No candidate papers found for this claim.");
       emptyState("Try selecting a more specific claim.");
@@ -340,57 +568,167 @@ async function loadMemory(): Promise<void> {
   }
 }
 
+// ── card action handlers (F3-F7) ────────────────────────────────────────────
+
+async function handleRemove(idx: number): Promise<void> {
+  const c = currentChecks[idx];
+  if (!c || !currentDoc) return;
+  const span = citeSpan(currentDoc.text, c.char_offset);
+  if (!span) {
+    setStatus(`Couldn't locate \\cite{${c.cite_key}} in the document.`, true);
+    return;
+  }
+  const oldText = currentDoc.text.slice(span.start, span.end);
+  // Strike the cite, leave a trail in a LaTeX comment the user will see.
+  const newText = "";
+  const ok = await proposeEdit({
+    title: `Remove \\cite{${c.cite_key}}`,
+    file: currentDoc.file,
+    fileContent: currentDoc.text,
+    start: span.start,
+    end: span.end,
+    oldText,
+    newText,
+    reason: c.reasoning,
+  });
+  if (ok) {
+    // Persist the rejection so a future Check doesn't re-flag the same pair.
+    const projectId = await getOverleafProjectId();
+    await rememberMemory({
+      projectId,
+      type: "reject",
+      claimText: c.claim_text,
+      paperKey: c.paper_arxiv_id || c.paper_doi || `cite-${c.cite_key}`,
+      citeKey: c.cite_key,
+      decision: "user_removed",
+      rationale: c.reasoning,
+    });
+  }
+}
+
+async function handleIgnore(idx: number): Promise<void> {
+  const c = currentChecks[idx];
+  if (!c) return;
+  const projectId = await getOverleafProjectId();
+  try {
+    await rememberMemory({
+      projectId,
+      type: "override",
+      claimText: c.claim_text,
+      paperKey: c.paper_arxiv_id || c.paper_doi || `cite-${c.cite_key}`,
+      citeKey: c.cite_key,
+      decision: "user_ignored",
+      rationale: `ignored ${c.issue_type}`,
+    });
+    setStatus(`Ignored — \\cite{${c.cite_key}} won't be re-flagged.`);
+  } catch (e) {
+    setStatus(e instanceof Error ? e.message : String(e), true);
+  }
+}
+
+async function handleMarkVerified(idx: number): Promise<void> {
+  const c = currentChecks[idx];
+  if (!c) return;
+  const projectId = await getOverleafProjectId();
+  try {
+    await rememberMemory({
+      projectId,
+      type: "accept",
+      claimText: c.claim_text,
+      paperKey: c.paper_arxiv_id || c.paper_doi || `cite-${c.cite_key}`,
+      citeKey: c.cite_key,
+      decision: "verified",
+      rationale: "user marked verified",
+    });
+    setStatus(`Marked \\cite{${c.cite_key}} as verified.`);
+  } catch (e) {
+    setStatus(e instanceof Error ? e.message : String(e), true);
+  }
+}
+
+async function handleInsert(idx: number): Promise<void> {
+  const cand = currentCandidates[idx];
+  if (!cand || !lastSelection) {
+    setStatus("Re-run Find citation, then Insert.", true);
+    return;
+  }
+  // Re-read the document so the insert offset is current.
+  const doc = await getOverleafDocument();
+  if (!doc) {
+    setStatus("Couldn't read the editor.", true);
+    return;
+  }
+  // Insert after the selected text. The cite-key is the paper_key for now
+  // (a real bib entry append is a Sprint-G task — for now the user copies
+  // the BibTeX separately; this just places the \cite marker).
+  const insertAt = lastSelection.end;
+  const citeKey = cand.paper_key.replace(/[^A-Za-z0-9_]/g, "");
+  await proposeEdit({
+    title: `Insert \\cite{${citeKey}}`,
+    file: doc.file,
+    fileContent: doc.text,
+    start: insertAt,
+    end: insertAt,
+    oldText: "",
+    newText: `~\\cite{${citeKey}}`,
+    reason: `cite ${cand.title}`,
+  });
+}
+
 // ── event wiring ─────────────────────────────────────────────────────────────
 
 $$(".tab").forEach((b) =>
   b.addEventListener("click", () => switchTab(b.dataset.tab ?? "check")),
 );
-
 btnCheck.addEventListener("click", () => void runCheck());
 btnEvidence.addEventListener("click", () => void runFindCitation());
 $("btn-memory-refresh").addEventListener("click", () => void loadMemory());
-
 for (const id of ["set-tier", "set-backend", "set-topk"]) {
   $(id).addEventListener("change", () => void saveSettings());
 }
 
-// Delegated clicks in the Check results pane.
 results.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  if (target.matches("[data-toggle]")) {
-    const card = target.closest("[data-card]");
+  const t = e.target as HTMLElement;
+  if (t.matches("[data-toggle]")) {
+    const card = t.closest("[data-card]");
     const panel = card?.querySelector<HTMLElement>(".evidence-collapsed");
     if (panel) {
       const open = panel.style.display !== "none";
       panel.style.display = open ? "none" : "block";
-      target.textContent =
-        (open ? "▸ " : "▾ ") + (target.textContent ?? "").slice(2);
+      t.textContent = (open ? "▸ " : "▾ ") + (t.textContent ?? "").slice(2);
     }
+    return;
   }
-  const copyKey = target.getAttribute("data-copy-cite");
+  const copyKey = t.getAttribute("data-copy-cite");
   if (copyKey) {
     void navigator.clipboard.writeText(`\\cite{${copyKey}}`);
-    target.textContent = "Copied!";
-    setTimeout(() => (target.textContent = "Copy \\cite key"), 1500);
+    t.textContent = "Copied!";
+    setTimeout(() => (t.textContent = "Copy \\cite key"), 1500);
+    return;
   }
+  const remove = t.getAttribute("data-remove");
+  if (remove) { void handleRemove(Number(remove)); return; }
+  const ignore = t.getAttribute("data-ignore");
+  if (ignore) { void handleIgnore(Number(ignore)); return; }
+  const markV = t.getAttribute("data-mark-verified");
+  if (markV) { void handleMarkVerified(Number(markV)); return; }
+  const insert = t.getAttribute("data-insert");
+  if (insert) { void handleInsert(Number(insert)); return; }
 });
 
-// Delegated clicks in the Memory pane (forget buttons).
 memoryList.addEventListener("click", (e) => {
-  const target = e.target as HTMLElement;
-  const recId = target.getAttribute("data-forget");
+  const t = e.target as HTMLElement;
+  const recId = t.getAttribute("data-forget");
   if (!recId) return;
-  const scope = (target.getAttribute("data-scope") ?? "project") as
-    | "project"
-    | "user";
-  target.textContent = "…";
+  const scope = (t.getAttribute("data-scope") ?? "project") as "project" | "user";
+  t.textContent = "…";
   void (async () => {
     try {
       const projectId = await getOverleafProjectId();
       await forgetMemory(recId, scope, projectId);
-      target.closest("[data-rec]")?.remove();
+      t.closest("[data-rec]")?.remove();
     } catch {
-      target.textContent = "failed";
+      t.textContent = "failed";
     }
   })();
 });

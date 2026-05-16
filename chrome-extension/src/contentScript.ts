@@ -14,6 +14,7 @@
  * native host.
  */
 import {
+  applyEdit,
   detectEditor,
   getActiveFileName,
   getCurrentText,
@@ -38,6 +39,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         text: getCurrentText(),
       });
       return false;
+
+    case "ol-apply": {
+      // { kind: "ol-apply", start, end, newText }
+      const result = applyEdit(
+        Number(msg.start),
+        Number(msg.end),
+        String(msg.newText ?? ""),
+      );
+      sendResponse(result);
+      return false;
+    }
 
     default:
       return false;

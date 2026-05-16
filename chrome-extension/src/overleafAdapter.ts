@@ -101,3 +101,101 @@ export function clearHighlights(): void {
     .querySelectorAll(".bibsync-highlight")
     .forEach((el) => el.classList.remove("bibsync-highlight"));
 }
+
+// ── editing (Sprint F) ──────────────────────────────────────────────────────
+
+/**
+ * Map a character offset (into getCurrentText()) to a DOM position
+ * { node, offset } inside the rendered `.cm-line` nodes.
+ *
+ * Returns null when the offset lands on a line CodeMirror hasn't
+ * rendered (CM6 virtualises — off-screen lines have no DOM). The
+ * caller surfaces a "scroll to the location and retry" message.
+ */
+function offsetToDOMPosition(
+  charOffset: number,
+): { node: Node; offset: number } | null {
+  const content = document.querySelector(".cm-content");
+  if (!content) return null;
+  const lines = Array.from(content.querySelectorAll(".cm-line"));
+  if (lines.length === 0) return null;
+
+  let consumed = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const lineText = line.textContent ?? "";
+    const lineEnd = consumed + lineText.length; // exclusive of the \n
+    if (charOffset <= lineEnd) {
+      // Target is within this line. Walk its descendant text nodes.
+      const within = charOffset - consumed;
+      let acc = 0;
+      const walker = document.createTreeWalker(line, NodeFilter.SHOW_TEXT);
+      let tn: Node | null = walker.nextNode();
+      if (!tn) {
+        // Empty line — position at the line element itself.
+        return { node: line, offset: 0 };
+      }
+      while (tn) {
+        const len = (tn.textContent ?? "").length;
+        if (acc + len >= within) {
+          return { node: tn, offset: within - acc };
+        }
+        acc += len;
+        tn = walker.nextNode();
+      }
+      // Past the last text node — clamp to end of line.
+      return { node: line, offset: line.childNodes.length };
+    }
+    consumed = lineEnd + 1; // +1 for the newline join
+  }
+  return null;
+}
+
+/**
+ * Replace the text in `[start, end)` with `newText`, applied through
+ * CodeMirror's contentEditable input handling.
+ *
+ * Mechanism: position a DOM Selection across the target range, then
+ * `document.execCommand("insertText")`. CM6 processes the resulting
+ * input event and updates its model — this is the only content-script-
+ * safe way to edit CM6 without injecting a page script.
+ *
+ * Returns { ok, reason }. `ok=false` with reason="offscreen" means the
+ * target range isn't rendered (virtualised) — the user must scroll
+ * near it and retry.
+ */
+export function applyEdit(
+  start: number,
+  end: number,
+  newText: string,
+): { ok: boolean; reason: string } {
+  const content = document.querySelector<HTMLElement>(".cm-content");
+  if (!content) return { ok: false, reason: "editor not found" };
+
+  const startPos = offsetToDOMPosition(start);
+  const endPos = offsetToDOMPosition(end);
+  if (!startPos || !endPos) {
+    return { ok: false, reason: "offscreen" };
+  }
+
+  const sel = window.getSelection();
+  if (!sel) return { ok: false, reason: "no selection api" };
+
+  try {
+    const range = document.createRange();
+    range.setStart(startPos.node, startPos.offset);
+    range.setEnd(endPos.node, endPos.offset);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    content.focus();
+    // execCommand is deprecated but remains the working path for
+    // programmatic contentEditable edits that CM6 will observe.
+    const ok = document.execCommand("insertText", false, newText);
+    return ok
+      ? { ok: true, reason: "" }
+      : { ok: false, reason: "execCommand rejected" };
+  } catch (e) {
+    return { ok: false, reason: String(e) };
+  }
+}
+

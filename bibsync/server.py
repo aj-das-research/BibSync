@@ -98,6 +98,20 @@ try:
         project_root: Optional[str] = None
         project_id: Optional[str] = None
 
+    class MemoryRememberRequest(BaseModel):
+        project_id: Optional[str] = None
+        project_root: Optional[str] = None
+        type: str                       # accept | reject | verdict | preference | override
+        claim_text: str = ""
+        paper_key: str = ""
+        cite_key: str = ""
+        decision: str = ""
+        tier: int = 0
+        confidence: float = 0.0
+        source: str = "extension"
+        rationale: str = ""
+        scope: str = "project"
+
     class MemoryPurgeRequest(BaseModel):
         project_root: str
 
@@ -341,6 +355,29 @@ def create_app(*, token: Optional[str] = None):
         mem = mem_mod.open_memory(project_root=pr, project_id=req.project_id)
         ok = mem.forget(req.record_id, scope=req.scope)  # type: ignore[arg-type]
         return {"ok": ok, "record_id": req.record_id}
+
+    @app.post("/memory/remember", dependencies=[_Depends(require_auth)])
+    def post_memory_remember(req: MemoryRememberRequest) -> dict:
+        """Write a memory record. Used by the extension's Ignore /
+        Mark-accepted actions — user-driven decisions that should
+        persist and influence future audits."""
+        from . import memory as mem_mod
+        pr = Path(req.project_root) if req.project_root else None
+        mem = mem_mod.open_memory(project_root=pr, project_id=req.project_id)
+        rec = mem.remember(
+            type_=req.type,  # type: ignore[arg-type]
+            claim_text=req.claim_text,
+            paper_key=req.paper_key,
+            cite_key=req.cite_key,
+            decision=req.decision,
+            tier=req.tier,
+            confidence=req.confidence,
+            source=req.source,
+            rationale=req.rationale,
+            scope=req.scope,  # type: ignore[arg-type]
+        )
+        from dataclasses import asdict
+        return {"ok": rec is not None, "record": asdict(rec) if rec else None}
 
     @app.delete("/memory/project", dependencies=[_Depends(require_auth)])
     def delete_memory_project(

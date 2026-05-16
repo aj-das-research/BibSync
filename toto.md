@@ -40,7 +40,7 @@ Each task carries a numeric ID (`C1`, `D3`, …). Inter-task dependencies are no
 | **C** | Stabilise core | Close benchmark failures, structure outputs for UI consumption | `[x]` ✅ **100% accuracy / 0% FDR** |
 | **D** | Local server + patch layer | `bibsync serve` + patch model; non-browser clients can drive the AI | `[x]` ✅ **12 endpoints, 12/12 tests pass** |
 | **E** | Chrome read-only | Side panel that displays issues, evidence, and suggested citations | `[x]` ✅ all 14 tasks — Check/Memory/Settings tabs live |
-| **F** | User-approved edits | Insert/replace/append actions with undo + conflict detection | `[ ]` |
+| **F** | User-approved edits | Insert/replace/append actions with undo + conflict detection | `[~]` core shipped — preview modal, insert, remove, ignore, mark-verified, undo, conflict; bib-append (F5) + multi-bib (F10) deferred |
 | **G** | Project-level | Full-project audit, multi-file BibTeX, batch review | `[ ]` |
 
 Definition of "done": all sprint tasks ticked AND the success target at the end of each sprint section is met.
@@ -427,14 +427,14 @@ Captured here so the plan is self-grounded.
 **Goal**: Patch-based edits the user approves are applied. Undo + conflict detection. The user is always in the loop.
 
 ### F1 · `applyPatch` on EditorAdapter
-- [ ] **Description**: Implement the CodeMirror 6 edit transaction in `overleafAdapter.ts`.
-- [ ] **Acceptance**: Calling `applyPatch({ type: insert_citation, range, new_text })` actually changes Overleaf's editor content.
+- [x] **Description**: Implement the CodeMirror 6 edit transaction in `overleafAdapter.ts`.
+- [x] **Acceptance**: Calling `applyPatch({ type: insert_citation, range, new_text })` actually changes Overleaf's editor content.
 
 ### F2 · Patch preview UI
-- [ ] **Description**: Modal showing before/after diff for a patch (using `/patch/preview`). Buttons: Accept, Reject, Explain.
+- [x] **Description**: Modal showing before/after diff for a patch (using `/patch/preview`). Buttons: Accept, Reject, Explain.
 
 ### F3 · "Insert citation" action
-- [ ] **Description**: For the "Find citation" flow — user clicks Insert; the extension constructs a patch, previews, applies on Accept.
+- [x] **Description**: For the "Find citation" flow — user clicks Insert; the extension constructs a patch, previews, applies on Accept.
 
 ### F4 · "Replace citation" action
 - [ ] **Description**: For `wrong_reference` issues — replaces the problematic `\cite{...}` with a suggested alternative. Always preview first.
@@ -443,17 +443,17 @@ Captured here so the plan is self-grounded.
 - [ ] **Description**: For citations not in `.bib` — appends the suggested entry to the detected `.bib` file. Detect via Overleaf project's file list.
 
 ### F6 · "Ignore warning" action
-- [ ] **Description**: Writes an `override` memory record so the same issue doesn't fire again. Records *why* (free-text or radio buttons).
+- [x] **Description**: Writes an `override` memory record so the same issue doesn't fire again. Records *why* (free-text or radio buttons).
 
 ### F7 · "Mark as accepted" action
-- [ ] **Description**: For `unverifiable` issues — writes an `accept` memory record so future runs skip the LLM call.
+- [x] **Description**: For `unverifiable` issues — writes an `accept` memory record so future runs skip the LLM call.
 
 ### F8 · Undo last BibSync edit
-- [ ] **Description**: Stash the pre-edit content per patch; clicking Undo writes it back via `applyPatch`. Depth-1 undo only (CM6 editor's own undo handles history).
+- [x] **Description**: Stash the pre-edit content per patch; clicking Undo writes it back via `applyPatch`. Depth-1 undo only (CM6 editor's own undo handles history).
 
 ### F9 · Patch conflict detection
-- [ ] **Description**: Before applying, the server verifies that `old_text` still matches the file content at the given range. If not, returns a conflict response; extension shows "File has changed — re-check before applying" instead of accepting.
-- [ ] **Depends on**: D7.
+- [x] **Description**: Before applying, the server verifies that `old_text` still matches the file content at the given range. If not, returns a conflict response; extension shows "File has changed — re-check before applying" instead of accepting.
+- [x] **Depends on**: D7.
 
 ### F10 · Multi-file BibTeX detection
 - [ ] **Description**: Overleaf projects often have multiple `.bib` files. The extension reads the project file list (via the Overleaf adapter) and asks the user where to append on first use; remembers the choice in `chrome.storage.local`.

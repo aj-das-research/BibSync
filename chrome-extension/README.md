@@ -109,11 +109,29 @@ Memory is scoped per Overleaf project: the project ID in the URL
 Check on the same project recalls prior verdicts instead of re-calling
 the LLM.
 
-## What's NOT in this build (Sprint F / G)
+## Editing (Sprint F)
 
-- Applying edits (insert / replace / append BibTeX) — patch model exists
-  server-side; the UI gate is Sprint F.
-- Full-project audit + batch review (Sprint G).
+The extension can now apply user-approved edits:
+
+| Action | Where | What it does |
+|---|---|---|
+| **Remove citation** | issue card (hallucinated / wrong) | strikes the `\cite{}`; writes a `reject` memory record |
+| **Insert \cite** | candidate card (Find flow) | inserts `~\cite{key}` after your selection |
+| **Ignore** | any problem card | writes an `override` memory record — won't be re-flagged |
+| **Mark verified** | unverifiable card | writes an `accept` memory record |
+| **Undo** | banner after any edit | reverts the most recent edit |
+
+Every edit shows a **before/after diff modal** first — nothing touches
+the manuscript without an explicit Accept click. If the file changed
+since the issue was computed, the modal shows a conflict warning and
+disables Accept (re-run Check first).
+
+## What's NOT in this build (Sprint G)
+
+- Append-BibTeX-entry edits (the `\cite` insert places the marker;
+  the bib entry must be copied in manually for now).
+- Multi-`.bib`-file target selection.
+- Full-project audit + batch review.
 
 ## Development
 

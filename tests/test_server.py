@@ -165,6 +165,49 @@ def test_cache_clear_refuses_memory(client, auth):
     assert r.status_code == 400
 
 
+def test_memory_remember_forget_roundtrip(client, auth):
+    """A record written via /memory/remember is listed by /memory and
+    disappears after /memory/forget — the full Sprint-F memory loop."""
+    pid = "test-sprint-f-project"
+    # Write an override record (the "Ignore warning" action).
+    r = client.post(
+        "/memory/remember", headers=auth,
+        json={
+            "project_id": pid,
+            "type": "override",
+            "claim_text": "GPT-3 achieves 86.5% on MedQA",
+            "paper_key": "arxiv-2005.14165",
+            "decision": "user_ignored",
+            "scope": "project",
+        },
+    )
+    assert r.status_code == 200, r.text
+    rec = r.json()["record"]
+    assert rec is not None
+    rid = rec["id"]
+
+    # It should now appear in /memory for this project.
+    r = client.get("/memory", headers=auth,
+                    params={"project_id": pid, "scope": "project"})
+    ids = [rr["id"] for rr in r.json()["records"]]
+    assert rid in ids
+
+    # Forget it.
+    r = client.post("/memory/forget", headers=auth,
+                    json={"record_id": rid, "scope": "project", "project_id": pid})
+    assert r.json()["ok"] is True
+
+    # Gone from /memory.
+    r = client.get("/memory", headers=auth,
+                    params={"project_id": pid, "scope": "project"})
+    ids = [rr["id"] for rr in r.json()["records"]]
+    assert rid not in ids
+
+    # Clean up the project file.
+    client.request("DELETE", "/memory/project", headers=auth,
+                    params={"project_id": pid})
+
+
 def test_privacy_endpoint(client, auth, tmp_path):
     r = client.get("/privacy", headers=auth, params={"project_root": str(tmp_path)})
     assert r.status_code == 200

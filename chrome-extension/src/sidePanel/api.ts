@@ -116,6 +116,101 @@ export async function forgetMemory(
   return Boolean((resp.body as { ok?: boolean })?.ok);
 }
 
+/** POST /memory/remember — write a record (Ignore / Mark-accepted actions). */
+export async function rememberMemory(args: {
+  projectId: string;
+  type: "accept" | "reject" | "verdict" | "preference" | "override";
+  claimText?: string;
+  paperKey?: string;
+  citeKey?: string;
+  decision?: string;
+  rationale?: string;
+}): Promise<boolean> {
+  const resp = await viaWorker({
+    method: "POST",
+    path: "/memory/remember",
+    body: {
+      project_id: args.projectId,
+      type: args.type,
+      claim_text: args.claimText ?? "",
+      paper_key: args.paperKey ?? "",
+      cite_key: args.citeKey ?? "",
+      decision: args.decision ?? "",
+      rationale: args.rationale ?? "",
+      source: "extension",
+      scope: "project",
+    },
+  });
+  if (!resp.ok) {
+    throw new Error(resp.error ?? `remember failed (status ${resp.status})`);
+  }
+  return Boolean((resp.body as { ok?: boolean })?.ok);
+}
+
+// ── patches (Sprint F) ──────────────────────────────────────────────────────
+
+/** A patch as the server expects it (mirror of bibsync/patches.py Patch). */
+export interface Patch {
+  patch_id: string;
+  type: string;
+  file: string;
+  range: { start: number; end: number };
+  old_text: string;
+  new_text: string;
+  reason: string;
+  issue_id: string;
+  user_approved: boolean;
+}
+
+/** POST /patch/preview — render a diff without applying. */
+export async function previewPatch(
+  patches: Patch[],
+  files: Record<string, string>,
+): Promise<{
+  ok: boolean;
+  preview: Record<string, { before: string; after: string; diff_unified: string }>;
+  conflicts: Array<{ patch_id: string; expected: string; actual: string; reason: string }>;
+}> {
+  const resp = await viaWorker({
+    method: "POST",
+    path: "/patch/preview",
+    body: { patches, files },
+  });
+  if (!resp.ok) {
+    throw new Error(resp.error ?? `preview failed (status ${resp.status})`);
+  }
+  return resp.body as never;
+}
+
+// ── Overleaf editing (Sprint F) ─────────────────────────────────────────────
+
+/**
+ * Apply a text edit into the live Overleaf editor via the content
+ * script (which calls overleafAdapter.applyEdit → execCommand on CM6).
+ *
+ * Returns { ok, reason }. reason="offscreen" means the target range
+ * isn't rendered (CM6 virtualised it) — the user must scroll near it.
+ */
+export async function applyOverleafEdit(
+  start: number,
+  end: number,
+  newText: string,
+): Promise<{ ok: boolean; reason: string }> {
+  const tab = await activeTab();
+  if (!tab?.id) return { ok: false, reason: "no active tab" };
+  try {
+    const resp = await chrome.tabs.sendMessage(tab.id, {
+      kind: "ol-apply",
+      start,
+      end,
+      newText,
+    });
+    return resp ?? { ok: false, reason: "no response from content script" };
+  } catch (e) {
+    return { ok: false, reason: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** POST /evidence — find supporting papers for a free-form claim. */
 export async function findEvidence(args: {
   claim: string;
