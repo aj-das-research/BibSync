@@ -1002,6 +1002,45 @@ DOES NOT SUPPORT (supports=false) — flag as hallucination/misattribution if:
   - The paper is in a different field that doesn't address the claim's subject.
   - The paper's contribution is unrelated to or contradicts the claim.
   - The citation looks fabricated (paper title and claim subject have no overlap).
+  - **SURVEY / REVIEW / TUTORIAL cited for an "introduced / proposed / originally
+    developed" CLAIM.** If the claim attributes a method, system, or finding to
+    being INTRODUCED, PROPOSED, ESTABLISHED, or ORIGINALLY developed in the
+    cited paper, AND the cited paper is a survey/review/tutorial/analysis/
+    probing study (title or abstract contains "survey of", "review of",
+    "overview of", "tutorial on", "analysis of X", "what does X learn",
+    "where it comes and where it goes", "Comprehensive evaluation",
+    "Revisiting X" without strong evidence it's the original), then
+    supports=false with high confidence. A survey paper documents a method
+    that ALREADY EXISTS; it cannot be the introduction of that method even
+    when topic alignment is perfect. Cite the ORIGINAL paper instead.
+
+    EXAMPLES that MUST be rejected:
+      claim: "The attention mechanism was introduced to address long-range
+              dependency limitations"
+      paper: "Attention mechanism in neural networks: where it comes and
+              where it goes" (a survey)
+      → supports=false, conf~0.85, reasoning="cited paper is a survey of the
+        attention mechanism, not its introduction; cite Bahdanau 2014 /
+        Vaswani 2017 instead"
+
+      claim: "BERT introduced bidirectional masked language modeling"
+      paper: "What does BERT learn about the structure of language?"
+              (a probing study)
+      → supports=false, conf~0.85, reasoning="cited paper is a probing
+        analysis of BERT, not its introduction; cite Devlin 2019 instead"
+
+    The topic-alignment rule does NOT override this. A survey of X is on
+    the topic of X but is not the source for "X was introduced by ..." or
+    "X was originally proposed in ...". Watch for attribution verbs.
+
+    IMPORTANT: when you reject a citation because the paper is a survey,
+    set ``"contradicted": false``. This is a misattribution
+    (wrong-paper-for-the-attribution), NOT a value-contradiction. The
+    survey paper doesn't report a DIFFERENT specific value for the same
+    entity — it just isn't the original source. ``contradicted=true`` is
+    reserved for the "claim says X=Y, paper says X=Z" pattern (see Tier-2
+    suffix), not for "claim says paper introduced X, but paper is a
+    survey of X".
 
 BE CONSERVATIVE: when in doubt, return supports=true with lower confidence. A
 wrong "this is hallucinated" verdict makes the user delete a good citation. A
