@@ -535,6 +535,7 @@ async def audit_project(
                 tier2_failure_reason = "no_open_access_pdf"
             else:
                 from .audit_sources.pdf import get_paper_text
+                from .audit_sources.tables import extract_tables_from_pdf
                 from .audit_rag import chunk_text
 
                 paper_key = content.stable_key()
@@ -542,7 +543,21 @@ async def audit_project(
                     chunks = paper_chunks_by_key[check.cite_key]
                 else:
                     text = await get_paper_text(paper_key, content.pdf_url, pdf_cache)
-                    chunks = chunk_text(text, paper_key) if text else []
+                    prose_chunks = chunk_text(text, paper_key) if text else []
+                    # Table-aware enrichment — pull structured tables from the
+                    # cached PDF and prepend them to the chunk list. Table
+                    # chunks are short (~50-300 tokens) so they don't crowd
+                    # out prose for unrelated queries; they just give RAG a
+                    # cleaner shot at numerical/benchmark claims.
+                    pdf_path = pdf_cache.pdf_path(paper_key) if pdf_cache else None
+                    table_chunks: list = []
+                    if pdf_path and pdf_path.exists():
+                        table_chunks = extract_tables_from_pdf(pdf_path, paper_key)
+                        # Renumber prose chunk_idx to follow the tables so
+                        # the global chunk index stays unique.
+                        for i, c in enumerate(prose_chunks):
+                            c.chunk_idx = len(table_chunks) + i
+                    chunks = table_chunks + prose_chunks
                     paper_chunks_by_key[check.cite_key] = chunks
 
                 if not chunks:

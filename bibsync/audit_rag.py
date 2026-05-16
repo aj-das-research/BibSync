@@ -49,12 +49,22 @@ from . import config, dbg
 
 @dataclass
 class Chunk:
-    """One retrievable chunk of a paper's full text."""
+    """One retrievable chunk of a paper's full text.
+
+    ``chunk_type`` distinguishes:
+      ``"prose"`` — overlapping word-window from running text. Default.
+      ``"table"``  — a structured table chunk (caption + headers + rows
+                     serialised as a markdown-ish table). Tables get
+                     ranked above prose for numerical/benchmark claims
+                     because the value usually lives there, not in the
+                     surrounding sentences.
+    """
 
     paper_key: str
     text: str
     page: Optional[int] = None
     chunk_idx: int = 0
+    chunk_type: str = "prose"
 
 
 _PAGE_BLOCK_RE = re.compile(r"\[Page (\d+)\]\n(.*?)(?=\[Page \d+\]|\Z)", re.DOTALL)
