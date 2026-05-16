@@ -812,41 +812,114 @@ async function handleMarkVerified(idx: number): Promise<void> {
   }
 }
 
+/**
+ * Compute where a `\cite{}` should be inserted relative to a selection.
+ *
+ * Rules (so the cite lands inline, not on a broken line):
+ *   1. Walk the offset BACK over trailing whitespace + newlines — the
+ *      cite must attach to the last visible character of the clause,
+ *      never jump to the next line.
+ *   2. Walk back over ONE trailing sentence punctuation mark (. , ; :)
+ *      so the result is the LaTeX-conventional "text~\cite{k}." and
+ *      not "text.~\cite{k}".
+ *   3. Pick the separator: a "~" (non-breaking space) unless the
+ *      preceding char is already whitespace / ~.
+ *   4. Flag if a \cite is already adjacent — so we don't double-cite.
+ */
+function citeInsertionPoint(
+  text: string,
+  selStart: number,
+  selEnd: number,
+): { offset: number; separator: string; alreadyCited: boolean } {
+  let p = Math.min(selEnd, text.length);
+  while (p > selStart && /\s/.test(text[p - 1])) p--;
+  if (p > selStart && /[.,;:]/.test(text[p - 1])) p--;
+  const around = text.slice(Math.max(0, p - 16), p + 16);
+  const alreadyCited = /\\(?:no)?cite\w*\s*\{/.test(around);
+  const prev = p > 0 ? text[p - 1] : "";
+  const separator = prev === "" || /\s/.test(prev) || prev === "~" ? "" : "~";
+  return { offset: p, separator, alreadyCited };
+}
+
+/**
+ * Detect the project's bibliography file from a .tex's content.
+ *   \addbibresource{references.bib}  → biblatex
+ *   \bibliography{references}        → bibtex / natbib
+ */
+function findBibResource(
+  text: string,
+): { name: string; command: string } | null {
+  let m = text.match(/\\addbibresource\s*\{([^}]+)\}/);
+  if (m) return { name: m[1].trim(), command: "addbibresource" };
+  m = text.match(/\\bibliography\s*\{([^}]+)\}/);
+  if (m) {
+    const raw = m[1].trim();
+    return { name: raw.endsWith(".bib") ? raw : raw + ".bib", command: "bibliography" };
+  }
+  return null;
+}
+
 async function handleInsert(idx: number): Promise<void> {
   const cand = currentCandidates[idx];
   if (!cand || !lastSelection) {
     setStatus("Re-run Find citation, then Insert.", true);
     return;
   }
-  // Re-read the document so the insert offset is current.
+  // Re-read the document so offsets are current.
   const doc = await getOverleafDocument();
   if (!doc) {
     setStatus("Couldn't read the editor.", true);
     return;
   }
-  // Insert after the selected text using the PROPER cite key
-  // (firstauthor+year+titleword, e.g. das2024confidence) — never the
-  // internal paper_key cache id.
-  const insertAt = lastSelection.end;
+  // Re-locate the selected text in the live document — more reliable
+  // than trusting the offset captured at selection time.
+  const selStart = doc.text.indexOf(lastSelection.text);
+  if (selStart < 0) {
+    setStatus(
+      "The selected text moved since Find citation — re-select it and try again.",
+      true,
+    );
+    return;
+  }
+  const selEnd = selStart + lastSelection.text.length;
+
+  const { offset, separator, alreadyCited } = citeInsertionPoint(
+    doc.text,
+    selStart,
+    selEnd,
+  );
+  if (alreadyCited) {
+    setStatus("There's already a \\cite here — skipped to avoid a duplicate.", true);
+    return;
+  }
+
+  // Proper cite key (firstauthor+year+titleword) — never the cache id.
   const citeKey = cand.cite_key || "untitled";
   const ok = await proposeEdit({
     title: `Insert \\cite{${citeKey}}`,
     file: doc.file,
     fileContent: doc.text,
-    start: insertAt,
-    end: insertAt,
+    start: offset,
+    end: offset,
     oldText: "",
-    newText: `~\\cite{${citeKey}}`,
+    newText: `${separator}\\cite{${citeKey}}`,
     reason: `cite ${cand.title}`,
   });
-  if (ok && cand.bibtex) {
-    // The \cite is in the .tex — but the .bib entry must exist too.
-    // Drop the entry on the clipboard so the user can paste it into
-    // their references.bib (a direct .bib append is a later task).
-    await navigator.clipboard.writeText(cand.bibtex);
+  if (!ok) return;
+
+  // The \cite is in the .tex — the .bib entry must exist too. Detect the
+  // project's bib file so we can tell the user exactly where it goes.
+  if (cand.bibtex) await navigator.clipboard.writeText(cand.bibtex);
+  const bib = findBibResource(doc.text);
+  if (bib) {
     setStatus(
-      `Inserted \\cite{${citeKey}}. The BibTeX entry is on your clipboard — ` +
-        `paste it into your .bib file.`,
+      `Inserted \\cite{${citeKey}}. BibTeX entry copied — paste it into ${bib.name}.`,
+    );
+  } else {
+    setStatus(
+      `Inserted \\cite{${citeKey}}. BibTeX entry copied. ⚠ This file has no ` +
+        "\\addbibresource / \\bibliography — add one (and a references.bib) " +
+        "so the citation resolves.",
     );
   }
 }
