@@ -1161,6 +1161,198 @@ def config_unset(key: str) -> None:
         console.print(f"[yellow]{key} was not set.[/yellow]")
 
 
+# memory -----------------------------------------------------------------------
+
+
+@main.group(name="memory")
+def memory_group() -> None:
+    """Inspect / manage the citation-decision memory.
+
+    BibSync remembers user accept/reject decisions, audit verdicts, and
+    inferred preferences in a local JSONL store at
+    ``~/Library/Caches/bibsync/memory/`` (XDG cache on Linux). Memory is
+    used to short-circuit repeat LLM calls — if you previously approved
+    a citation, the next ``suggest``/``audit`` pass remembers and skips
+    the judge call. Run with ``--no-memory`` on any command to disable
+    the lookup for that run only.
+
+    Memory is scoped two ways:
+
+      • project: ``<sha1(realpath)>`` of the project directory. Per-
+        project decisions (canonical mappings, rejections, audit
+        verdicts) live here.
+      • user: cross-project preferences (e.g. "prefer NeurIPS for ML
+        claims") live here.
+    """
+
+
+def _memory_project_arg(f):
+    """Reusable ``--project`` Path option for memory subcommands."""
+    return click.option(
+        "--project", "project_root",
+        type=click.Path(exists=True, file_okay=False, path_type=Path),
+        default=None,
+        help="Project directory (for project-scoped memory). Omit to "
+        "inspect user-scoped memory only.",
+    )(f)
+
+
+@memory_group.command(name="show")
+@_memory_project_arg
+@click.option(
+    "--scope", type=click.Choice(["project", "user", "all"]),
+    default="all", show_default=True,
+)
+@click.option(
+    "--type", "type_filter",
+    type=click.Choice(["accept", "reject", "verdict", "preference", "override"]),
+    default=None,
+    help="Filter by record type.",
+)
+@click.option(
+    "--limit", type=int, default=50, show_default=True,
+    help="Show at most this many records (most recent first).",
+)
+def memory_show(
+    project_root: Optional[Path],
+    scope: str,
+    type_filter: Optional[str],
+    limit: int,
+) -> None:
+    """List memory records in a table, most recent first."""
+    from . import memory as mem_mod
+
+    mem = mem_mod.open_memory(project_root=project_root)
+    if scope == "all":
+        records = mem.all_records()
+    else:
+        records = mem.all_records(scope=scope)  # type: ignore[arg-type]
+    if type_filter:
+        records = [r for r in records if r.type == type_filter]
+    records = records[:limit]
+
+    if not records:
+        console.print("[dim]No memory records match the filters.[/dim]")
+        return
+
+    t = Table(
+        title=f"Memory records ({len(records)} shown)",
+        show_lines=False,
+    )
+    t.add_column("Type"); t.add_column("Scope"); t.add_column("Claim")
+    t.add_column("Paper"); t.add_column("Decision"); t.add_column("Tier", justify="right")
+    t.add_column("When"); t.add_column("ID", style="dim")
+    for r in records:
+        claim_short = (r.claim_text[:50] + "…") if len(r.claim_text) > 50 else r.claim_text
+        paper_short = r.paper_key or r.cite_key or "—"
+        t.add_row(
+            r.type, r.scope, claim_short, paper_short,
+            r.decision or "—", str(r.tier or "—"), r.ts, r.id,
+        )
+    console.print(t)
+
+
+@memory_group.command(name="list")
+@_memory_project_arg
+def memory_list(project_root: Optional[Path]) -> None:
+    """One-line summary of every memory record (compact alternative to `show`)."""
+    from . import memory as mem_mod
+
+    mem = mem_mod.open_memory(project_root=project_root)
+    records = mem.all_records()
+    if not records:
+        console.print("[dim]No memory records.[/dim]")
+        return
+    for r in records:
+        claim = (r.claim_text[:55] + "…") if len(r.claim_text) > 55 else r.claim_text
+        scope_color = "magenta" if r.scope == "project" else "cyan"
+        console.print(
+            f"  [{scope_color}]{r.scope:>7}[/{scope_color}]  "
+            f"[bold]{r.type:11}[/bold]  "
+            f"{r.decision or '—':14}  "
+            f"{claim!r}  "
+            f"[dim]{r.id}[/dim]"
+        )
+    console.print(f"\n[dim]{len(records)} record(s) total.[/dim]")
+
+
+@memory_group.command(name="forget")
+@_memory_project_arg
+@click.argument("record_id")
+@click.option(
+    "--scope", type=click.Choice(["project", "user"]),
+    default="project", show_default=True,
+)
+def memory_forget(
+    project_root: Optional[Path],
+    record_id: str,
+    scope: str,
+) -> None:
+    """Mark a memory record as forgotten (writes a tombstone).
+
+    The original record stays in the JSONL file (append-only safety),
+    but reads filter it out. Use ``bibsync memory show`` to find the
+    record ID first.
+    """
+    from . import memory as mem_mod
+
+    mem = mem_mod.open_memory(project_root=project_root)
+    ok = mem.forget(record_id, scope=scope)  # type: ignore[arg-type]
+    if ok:
+        console.print(f"[green]Forgot[/green] [bold]{record_id}[/bold] (scope={scope})")
+    else:
+        console.print(
+            f"[yellow]No record with id {record_id!r} in scope {scope!r}.[/yellow]\n"
+            "[dim]Use [bold]bibsync memory show[/bold] to list available IDs.[/dim]"
+        )
+
+
+@memory_group.command(name="purge-project")
+@_memory_project_arg
+@click.confirmation_option(prompt="Delete ALL project-scoped memory for this directory?")
+def memory_purge_project(project_root: Optional[Path]) -> None:
+    """Delete every project-scoped memory record for a directory.
+
+    User-scoped memory (cross-project preferences) is preserved.
+    Prompts for confirmation unless ``--yes`` is passed.
+    """
+    from . import memory as mem_mod
+
+    if project_root is None:
+        console.print(
+            "[red]--project is required for purge-project.[/red] "
+            "Use [bold]bibsync memory purge-project --project .[/bold] "
+            "to target the current directory."
+        )
+        sys.exit(2)
+    mem = mem_mod.open_memory(project_root=project_root)
+    if mem.purge_project():
+        console.print(
+            f"[green]Deleted project-scoped memory for[/green] "
+            f"[bold]{project_root}[/bold]"
+        )
+    else:
+        console.print(
+            f"[yellow]No project-scoped memory existed for[/yellow] "
+            f"[bold]{project_root}[/bold]"
+        )
+
+
+@memory_group.command(name="path")
+@_memory_project_arg
+def memory_path(project_root: Optional[Path]) -> None:
+    """Print the on-disk paths for user and project memory files."""
+    from . import memory as mem_mod
+
+    mem = mem_mod.open_memory(project_root=project_root)
+    console.print(f"[bold]user[/bold]   : {mem.user_file}")
+    if mem.project_file is not None:
+        console.print(f"[bold]project[/bold]: {mem.project_file}")
+        console.print(f"           [dim](project_id={mem.project_id})[/dim]")
+    else:
+        console.print("[dim]project: (none — pass --project to scope to a directory)[/dim]")
+
+
 # extract ----------------------------------------------------------------------
 
 
