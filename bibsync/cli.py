@@ -1182,6 +1182,113 @@ def config_unset(key: str) -> None:
         console.print(f"[yellow]{key} was not set.[/yellow]")
 
 
+# evidence --------------------------------------------------------------------
+
+
+@main.command(name="evidence")
+@click.argument("claim")
+@click.option(
+    "--top-papers", "top_papers",
+    type=int, default=5, show_default=True,
+    help="Number of candidate papers to search + retrieve evidence from.",
+)
+@click.option(
+    "--tier", type=click.IntRange(0, 2), default=2, show_default=True,
+    help="Evidence depth — 1 uses abstracts, 2 adds RAG against PDFs.",
+)
+@click.option(
+    "--rag-top-k", type=int, default=5, show_default=True,
+    help="Tier-2 only: chunks retrieved per candidate paper.",
+)
+@click.option(
+    "--embedding-backend",
+    type=click.Choice(["auto", "local", "api"]),
+    default="auto", show_default=True,
+)
+@click.option(
+    "--cache-dir", type=click.Path(path_type=Path), default=None,
+)
+@click.option(
+    "--output-json", "output_json",
+    type=click.Path(path_type=Path), default=None,
+    help="Write a machine-readable JSON report to this path.",
+)
+def evidence_cmd(
+    claim: str,
+    top_papers: int,
+    tier: int,
+    rag_top_k: int,
+    embedding_backend: str,
+    cache_dir: Optional[Path],
+    output_json: Optional[Path],
+) -> None:
+    """Find supporting / contradicting evidence for a free-form CLAIM.
+
+    Doesn't require a pre-existing \\cite{}. Searches OpenAlex for candidate
+    papers, runs RAG retrieval against each, returns short evidence quotes
+    with paper attribution. Useful when writing — paste your sentence,
+    bibsync tells you which paper(s) actually support it.
+
+    Example:
+      bibsync evidence "Transformers introduced multi-head self-attention"
+    """
+    from . import evidence_cmd as ev_mod
+
+    llm_cfg = cfg.resolve_llm_config()
+    if not llm_cfg:
+        console.print(
+            "[red]No LLM API key configured.[/red] Set one with "
+            "[bold]bibsync config set openrouter_key sk-or-...[/bold]"
+        )
+        sys.exit(2)
+
+    console.print(
+        f"[dim]Searching for evidence of:[/dim]\n  [bold]{claim!r}[/bold]\n"
+        f"[dim](top-{top_papers} candidates, tier {tier})[/dim]\n"
+    )
+
+    report = ev_mod.find_evidence_sync(
+        claim,
+        top_papers=top_papers,
+        tier=tier,
+        rag_top_k=rag_top_k,
+        embedding_backend=embedding_backend,
+        cache_dir=cache_dir,
+        api_key=llm_cfg.api_key,
+    )
+
+    if not report.candidates:
+        console.print("[yellow]No candidate papers found.[/yellow]")
+        return
+
+    # Pretty-print the top results
+    for i, c in enumerate(report.candidates, 1):
+        author = (c.first_author + " ") if c.first_author else ""
+        year = f"({c.year})" if c.year else ""
+        cited = f"cited={c.cited_by}" if c.cited_by else ""
+        tier_label = ["meta", "abs", "RAG"][c.evidence_tier]
+        console.print(
+            f"[bold]#{i}[/bold]  {c.title}\n"
+            f"     [dim]{author}{year}  {c.venue}  {cited}  [{tier_label}][/dim]"
+        )
+        if c.spans:
+            for s in c.spans[:3]:
+                page = f"p.{s.get('page')}" if s.get("page") else "—"
+                console.print(
+                    f"     [{s.get('type', 'supporting')}] [cyan]{page}[/cyan]  "
+                    f"[italic]{s.get('quote', '')}[/italic]"
+                )
+        elif c.note:
+            console.print(f"     [dim]{c.note}[/dim]")
+        console.print()
+
+    if output_json:
+        output_json.write_text(
+            json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+        )
+        console.print(f"[dim]JSON written to {output_json}[/dim]")
+
+
 # memory -----------------------------------------------------------------------
 
 
