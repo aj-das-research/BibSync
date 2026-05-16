@@ -1210,28 +1210,80 @@ claim. The retrieved chunks are the only evidence — if a number or named
 entity isn't in them, you cannot verify it.
 
 ═════════════════════════════════════════════════════════════════════
-CONTRADICTION DETECTION (contradicted=true)
+CONTRADICTION DETECTION (contradicted=true) — read in full
 ═════════════════════════════════════════════════════════════════════
-Set ``"contradicted": true`` in your JSON when the retrieved chunks contain
-a SPECIFIC CONFLICTING VALUE for the same entity in the claim. Examples:
+Set ``"contradicted": true`` whenever the retrieved chunks NAME the same
+entity from the claim but report a DIFFERENT specific value, version, or
+identity. This is a STRUCTURED checklist — walk it before deciding:
 
-  claim:   "GPT-3 reaches 90% on MedQA"
-  chunk:   "p.18 reports GPT-3 17.8% on MedQA closed-book"
-  → supports=false, conf=0.95, contradicted=true,
-    reasoning="paper reports GPT-3 17.8% on MedQA (p.18), not 90%"
+  ① Identify the entity from the claim (e.g. "ResNet-50", "BERT-base",
+     "GPT-3", "Med-PaLM 2", "MedQA benchmark").
+  ② Identify the specific value claimed (e.g. "100M parameters", "86.5%",
+     "deepest residual network", "12 layers").
+  ③ Scan the retrieved chunks for the SAME ENTITY by name. Look in:
+       • table rows (`| ResNet-50 | 25.5M | ... |`)
+       • architecture descriptions (`ResNet-50 has X parameters`)
+       • figure captions / spec lines
+  ④ If you find the entity in a chunk AND it specifies a different value
+     than the claim → supports=false, contradicted=true. QUOTE the chunk
+     line in the reasoning field.
+  ⑤ If the chunks discuss the topic but never name the specific entity
+     at all → supports=false, contradicted=false (just unsupported).
+  ⑥ If the chunks discuss DIFFERENT entities (e.g. claim says ResNet-50,
+     paper only details ResNet-152) AND the claim implies a relative
+     property (e.g. "ResNet-50 is the deepest"), that's still contradicted
+     when the paper makes a contradicting relative statement
+     ("ResNet-152, the deepest of our models, achieves...").
 
-  claim:   "BERT-base has 220M parameters"
-  chunk:   "BERTBASE (L=12, H=768, A=12, Total Parameters=110M)"
-  → supports=false, conf=0.95, contradicted=true,
-    reasoning="paper specifies BERT-base has 110M parameters, not 220M"
+Worked examples — read carefully and apply the same reasoning structure:
 
-Contradiction is STRICTLY STRONGER than "no support":
-  • no support  = chunks don't mention the specific number/entity in claim
-  • contradicted = chunks mention the same entity with a DIFFERENT value
+  EXAMPLE A · numerical value mismatch
+    claim:   "GPT-3 reaches 90% on MedQA"
+    chunk:   "p.18 reports GPT-3 17.8% on MedQA closed-book"
+    verdict: supports=false, conf=0.95, contradicted=true,
+             reasoning="paper reports GPT-3 17.8% on MedQA (p.18), not 90%"
 
-When in doubt, prefer supports=false without contradicted=true (the safer
-verdict). Only set contradicted=true when you can quote a chunk that names
-the same benchmark/entity with a value that conflicts with the claim's value.
+  EXAMPLE B · spec value mismatch
+    claim:   "BERT-base has 220M parameters"
+    chunk:   "BERTBASE (L=12, H=768, A=12, Total Parameters=110M)"
+    verdict: supports=false, conf=0.95, contradicted=true,
+             reasoning="paper specifies BERT-base has 110M parameters, not 220M"
+
+  EXAMPLE C · model-version mismatch (NEW)
+    claim:   "BERT-base has 24 transformer layers and 340M parameters"
+    chunk:   "We have two model sizes: BERTBASE (L=12, ... 110M) and
+              BERTLARGE (L=24, ... 340M)"
+    verdict: supports=false, conf=0.95, contradicted=true,
+             reasoning="paper reports BERT-BASE has L=12, 110M params;
+                        the claim's 24/340M values describe BERT-LARGE"
+
+  EXAMPLE D · structural property mismatch (NEW)
+    claim:   "ResNet-50 has 100 million parameters and was the deepest
+              residual network in the He 2016 paper"
+    chunk:   "We present ResNet-50, ResNet-101 and ResNet-152
+              architectures... ResNet-152 ... is 8× deeper than VGG"
+    chunk:   "ResNet-50 model size: 25.5M parameters"
+    verdict: supports=false, conf=0.95, contradicted=true,
+             reasoning="paper reports ResNet-50 has 25.5M params (not 100M),
+                        and ResNet-152 (not ResNet-50) is the deepest"
+
+  EXAMPLE E · same-entity-not-mentioned (NOT contradiction)
+    claim:   "GPT-3 achieves 86.5% on MedQA"
+    chunk:   "GPT-3 evaluates on TriviaQA, LAMBADA, and HellaSwag"
+    verdict: supports=false, conf=0.9, contradicted=false,
+             reasoning="no chunk mentions MedQA — unsupported, not
+                        contradicted (paper doesn't make a competing claim)"
+
+KEY DISTINCTION:
+  • "paper says X is Y, claim says X is Z (Y ≠ Z)"  →  contradicted=true
+  • "claim says X is Y, paper never mentions X's Y at all"  →  contradicted=false
+  • "claim says property P of X; paper says property P of A DIFFERENT entity"
+    →  contradicted=true IF the claim implies X uniquely has P
+        (e.g. "X is the deepest" but paper says "Z is the deepest")
+
+When you set contradicted=true you MUST quote (in reasoning) the chunk
+phrase that shows the conflicting value/identity. Without a verbatim
+quote, leave contradicted=false.
 """
 
 
