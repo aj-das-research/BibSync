@@ -190,6 +190,72 @@ class _BM25Index:
         return [float(s) for s in self._bm25.get_scores(q_tokens)]
 
 
+# Default reranker — small (80 MB), standard cross-encoder baseline, fastembed-
+# native ONNX. ``BAAI/bge-reranker-base`` (1 GB) is available as a higher-
+# quality opt-in via ``--reranker-model``; keeps the default install footprint
+# in line with the embedding model (bge-small at 80 MB).
+DEFAULT_RERANKER_MODEL = "Xenova/ms-marco-MiniLM-L-6-v2"
+
+
+class _CrossEncoderReranker:
+    """fastembed TextCrossEncoder wrapper.
+
+    Lazy-loaded singleton per (model_name) — fastembed caches the ONNX
+    model on disk after first download (~80 MB for MiniLM). Subsequent
+    ``score()`` calls are <10ms for 20 chunks.
+
+    Returns one relevance score per (query, chunk_text) pair so the
+    caller can re-sort. The score scale is model-dependent (MiniLM
+    outputs logits in roughly [-10, +10]); for our purposes only the
+    *ordering* matters.
+    """
+
+    def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL):
+        from fastembed.rerank.cross_encoder import TextCrossEncoder  # type: ignore
+
+        self.model_name = model_name
+        self._encoder = TextCrossEncoder(model_name=model_name)
+
+    def score(self, query: str, chunk_texts: list[str]) -> list[float]:
+        if not chunk_texts:
+            return []
+        # rerank() returns a generator of floats, one per pair.
+        scores = list(self._encoder.rerank(query, chunk_texts))
+        return [float(s) for s in scores]
+
+
+# Module-level singleton — created on first use, never invalidated. The model
+# weights live on disk after download; reloading them per audit run would be
+# wasteful. None until first init; lazy-initialised by _get_reranker().
+_RERANKER_CACHE: dict[str, _CrossEncoderReranker] = {}
+
+
+def _get_reranker(model_name: str = DEFAULT_RERANKER_MODEL) -> Optional[_CrossEncoderReranker]:
+    """Return a cached cross-encoder reranker, or None on import failure."""
+    if model_name in _RERANKER_CACHE:
+        return _RERANKER_CACHE[model_name]
+    try:
+        _RERANKER_CACHE[model_name] = _CrossEncoderReranker(model_name)
+        dbg.trace("audit.rag", "reranker ready", model=model_name)
+        return _RERANKER_CACHE[model_name]
+    except ImportError:
+        dbg.trace(
+            "audit.rag",
+            "fastembed cross-encoder unavailable — install fastembed>=0.4 to "
+            "enable reranking. Retrieval will use RRF-only ordering.",
+        )
+        return None
+    except Exception as e:
+        dbg.trace(
+            "audit.rag",
+            "reranker init failed",
+            model=model_name,
+            error_type=type(e).__name__,
+            error=str(e) or repr(e),
+        )
+        return None
+
+
 def _rrf_fuse(
     rank_lists: list[list[int]],
     *,
@@ -521,6 +587,8 @@ class EmbeddingStore:
         top_k: int = 5,
         hybrid: bool = True,
         candidate_pool: int = 20,
+        rerank: bool = True,
+        rerank_model: str = DEFAULT_RERANKER_MODEL,
     ) -> list[tuple[Chunk, float]]:
         """Retrieve the top-K chunks for ``query`` from ``chunks``.
 
@@ -585,10 +653,56 @@ class EmbeddingStore:
         # Fuse rankings via RRF when we have both; otherwise dense-only.
         if hybrid and bm25_rank:
             fused = _rrf_fuse([dense_rank, bm25_rank])
-            top = fused[:top_k]
-            # For tracing, also expose the dense cosine of the chosen chunks
-            # so traces remain comparable to the pre-hybrid era.
+            # Take the top-N fused candidates (N = candidate_pool capped at
+            # len(fused)) and run them through a cross-encoder reranker.
+            # The reranker scores (query, chunk) pairs with full attention,
+            # which is dramatically more precise than RRF's rank-only score.
+            #
+            # Cost: ~5-20ms per pair on CPU for MiniLM-L-6. With
+            # candidate_pool=20 that's ≤400ms — well below the LLM-judge
+            # call's ~1-3s — so it's a free quality win when the model is
+            # cached locally.
+            rerank_pool_idxs = [i for i, _ in fused[:candidate_pool]]
             dense_lookup = dict(dense_scored)
+            reranker = _get_reranker(rerank_model) if rerank else None
+            if reranker is not None and len(rerank_pool_idxs) > top_k:
+                try:
+                    pool_texts = [chunks[i].text for i in rerank_pool_idxs]
+                    scores = reranker.score(query, pool_texts)
+                    reranked = sorted(
+                        zip(rerank_pool_idxs, scores),
+                        key=lambda t: t[1],
+                        reverse=True,
+                    )
+                    top_idxs = [i for i, _ in reranked[:top_k]]
+                    result = [
+                        (chunks[i], float(dense_lookup.get(i, 0.0)))
+                        for i in top_idxs
+                    ]
+                    dbg.trace(
+                        "audit.rag",
+                        "retrieved (hybrid+rerank)",
+                        key=paper_key,
+                        top_k=top_k,
+                        backend=self.effective_backend,
+                        cosine_scores=[round(s, 3) for _, s in result],
+                        rerank_scores=[round(s, 3) for _, s in reranked[:top_k]],
+                        dense_pool=len(dense_rank),
+                        bm25_pool=len(bm25_rank),
+                        fused_pool=len(fused),
+                        rerank_pool=len(rerank_pool_idxs),
+                    )
+                    return result
+                except Exception as e:
+                    dbg.trace(
+                        "audit.rag",
+                        "reranker scoring failed; falling back to RRF order",
+                        error_type=type(e).__name__,
+                        error=str(e) or repr(e),
+                    )
+
+            # Reranker unavailable, disabled, or failed → return RRF top-K.
+            top = fused[:top_k]
             result = [(chunks[i], float(dense_lookup.get(i, 0.0))) for i, _ in top]
             dbg.trace(
                 "audit.rag",
