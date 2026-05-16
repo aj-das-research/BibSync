@@ -275,6 +275,112 @@ def _is_quantitative_claim(claim: str) -> bool:
     return bool(_QUANTITATIVE_CLAIM_RE.search(claim or ""))
 
 
+# ── claim-type classification + routing ────────────────────────────────────
+
+
+# Named-method anchor heuristics — uppercase named systems. Matches:
+#   1. Hyphenated: BERT-base, ResNet-50, Med-PaLM, GPT-3
+#   2. CamelCase: AlphaFold, MedSAM
+#   3. CapsWord + digit: GPT3, ResNet50
+#   4. Allowlisted single CapsWord ML systems: Transformer, BERT, ResNet, ...
+#   5. All-caps acronyms with length >= 3 (UNI, MLLM, but NOT "AI" or "ML")
+_NAMED_METHOD_PATTERNS = [
+    r"\b[A-Z][A-Za-z]+(?:-[A-Za-z0-9]+)+\b",        # BERT-base, Med-PaLM-2
+    r"\b[A-Z][a-z]+(?:[A-Z][a-z]+)+\b",              # AlphaFold, MedSAM
+    r"\b[A-Z][A-Za-z]+\d+\b",                        # GPT3, ResNet50
+    r"\b(?:Transformer|BERT|ResNet|GPT|RoBERTa|T5|"   # allowlisted single-word
+    r"AlphaFold|MedPaLM|MedGemini|Llama|Gemini|"
+    r"DALL[·\-]?E|Whisper|Stable\s?Diffusion|"
+    r"Mamba|Mistral|Phi|Qwen|DeepSeek|Claude)\b",
+    r"\b[A-Z]{3,}\b",                                 # UNI, MLLM, GPT, LLM (≥3 chars)
+]
+_NAMED_METHOD_RE = re.compile("|".join(_NAMED_METHOD_PATTERNS))
+
+# Tokens that match the regex above but aren't actually "named methods" —
+# common acronyms / English words in caps. Used to filter false positives.
+_NAMED_METHOD_STOPLIST = {
+    "AI", "ML", "NLP", "CV", "RL", "GPU", "CPU", "TPU", "API", "URL",
+    "PDF", "TEX", "OK", "TODO", "FIXME", "USA", "UK", "EU", "MIT", "CVPR",
+    "NEURIPS", "ICLR", "ICML", "ACL", "EMNLP", "NAACL", "AAAI", "IEEE",
+}
+
+# Attribution-style claim verbs ("introduce", "propose", "establish", etc.)
+# — when present alongside a named method, the claim is about who-did-what,
+# not numerical content.
+_ATTRIBUTION_VERB_RE = re.compile(
+    r"\b(introduced?|propos(?:ed|es)|present(?:ed|s)?|establish(?:ed|es)?|"
+    r"developed?|describe[ds]?|coined|first|originally)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class ClaimType:
+    """Classification label + per-class retrieval strategy.
+
+    Returned by ``classify_claim``. Audit pipeline unpacks the params
+    into the relevant `EmbeddingStore.retrieve` and contradiction-query
+    decisions, so different claims get different cost/recall tradeoffs:
+
+      quantitative  — top_k=8, rerank=True, contradiction-query=True.
+                      Most expensive. Justified by retrieval precision
+                      being load-bearing for number / benchmark claims.
+      named-method  — top_k=5, rerank=True, contradiction-query=False.
+                      Standard. Method-attribution claims need precision
+                      but rarely have a value to contradict.
+      attribution   — top_k=3, rerank=True, contradiction-query=False.
+                      Cheap. Who-did-what claims usually resolve from
+                      the abstract + a few prose chunks.
+      generic       — top_k=3, rerank=False, contradiction-query=False.
+                      Cheapest. Topic-level claims about whole methods/
+                      fields don't need fine-grained retrieval.
+    """
+
+    label: str  # "quantitative" | "named-method" | "attribution" | "generic"
+    top_k: int
+    rerank: bool
+    contradiction_query: bool
+
+
+_CLAIM_TYPE_QUANTITATIVE = ClaimType("quantitative", top_k=8, rerank=True, contradiction_query=True)
+_CLAIM_TYPE_NAMED_METHOD = ClaimType("named-method", top_k=5, rerank=True, contradiction_query=False)
+_CLAIM_TYPE_ATTRIBUTION = ClaimType("attribution", top_k=3, rerank=True, contradiction_query=False)
+_CLAIM_TYPE_GENERIC = ClaimType("generic", top_k=3, rerank=False, contradiction_query=False)
+
+
+def classify_claim(claim: str) -> ClaimType:
+    """Map a prose claim to one of four retrieval strategies.
+
+    Order matters — quantitative checked first because its signal is
+    the strongest (specific numbers / benchmark names are unambiguous).
+    Attribution checked before generic because "introduced" + a named
+    method is more specific than topic-level prose. Falls through to
+    generic when nothing fires.
+
+    Pure regex — no LLM call, no model load, sub-microsecond per claim.
+    Worst-case misclassification (generic claim mis-routed as
+    quantitative) only widens the retrieval pool; never produces a
+    wrong verdict.
+    """
+    if not claim or not claim.strip():
+        return _CLAIM_TYPE_GENERIC
+    if _is_quantitative_claim(claim):
+        return _CLAIM_TYPE_QUANTITATIVE
+    # Find named-method matches and filter out stoplist tokens (acronyms
+    # like "AI", "ML" that aren't real methods).
+    matches = [
+        m for m in _NAMED_METHOD_RE.findall(claim)
+        if m.upper() not in _NAMED_METHOD_STOPLIST
+    ]
+    has_named = bool(matches)
+    has_verb = bool(_ATTRIBUTION_VERB_RE.search(claim))
+    if has_named and has_verb:
+        return _CLAIM_TYPE_ATTRIBUTION
+    if has_named:
+        return _CLAIM_TYPE_NAMED_METHOD
+    return _CLAIM_TYPE_GENERIC
+
+
 # Pattern matches the specific *value* in a quantitative claim. Used to build
 # a "contradiction query" — same entities and benchmark names but stripped of
 # the claim's specific number, so retrieval surfaces chunks reporting the
@@ -563,11 +669,35 @@ async def audit_project(
                 if not chunks:
                     tier2_failure_reason = "pdf_download_or_extract_failed"
                 else:
+                    # CLAIM-TYPE ROUTING — different claim shapes need
+                    # different retrieval depths. Pure regex classification,
+                    # so it's free per claim and worst-case mismatches just
+                    # widen the pool without producing wrong verdicts.
+                    ctype = classify_claim(check.claim_text)
+                    # The CLI ``--rag-top-k`` flag is treated as a CEILING,
+                    # not a fixed value: generic claims still use top_k=3
+                    # if that's lower; quantitative claims still cap at
+                    # the user's setting if THEY set it lower. Default 5
+                    # gives quantitative claims their full top_k=8.
+                    effective_top_k = min(ctype.top_k, rag_top_k * 2)
+                    if rag_top_k != 5:
+                        # Explicit user override always wins.
+                        effective_top_k = rag_top_k
+                    dbg.trace(
+                        "audit.classify",
+                        "claim type",
+                        type=ctype.label,
+                        top_k=effective_top_k,
+                        rerank=ctype.rerank,
+                        contradict=ctype.contradiction_query,
+                        claim=check.claim_text[:80],
+                    )
                     top = await embed_store.retrieve(
                         query=check.claim_text,
                         paper_key=paper_key,
                         chunks=chunks,
-                        top_k=rag_top_k,
+                        top_k=effective_top_k,
+                        rerank=ctype.rerank,
                     )
                     if not top:
                         tier2_failure_reason = "embedding_failed"
@@ -577,35 +707,36 @@ async def audit_project(
                         ]
                         check.n_chunks = len(retrieved_chunk_texts)
 
-                        # Contradiction retrieval — only when the claim is
-                        # quantitative AND a value-stripped query is non-trivial.
-                        # Retrieves a SMALL extra pool of chunks (top-3) using a
-                        # query that targets the same entity without the claim's
-                        # specific value, so the LLM can spot conflicting numbers.
-                        contradiction_q = _make_contradiction_query(check.claim_text)
-                        if contradiction_q:
-                            extra = await embed_store.retrieve(
-                                query=contradiction_q,
-                                paper_key=paper_key,
-                                chunks=chunks,
-                                top_k=3,
-                            )
-                            # De-dupe: only add chunks not already in `top`.
-                            already = {id(c) for c, _ in top}
-                            extra_texts = [
-                                f"[p.{c.page or '?'}] {c.text}"
-                                for c, _ in extra
-                                if id(c) not in already
-                            ]
-                            if extra_texts:
-                                retrieved_chunk_texts.extend(extra_texts)
-                                check.n_chunks = len(retrieved_chunk_texts)
-                                dbg.trace(
-                                    "audit.contradict",
-                                    "added chunks",
-                                    n_extra=len(extra_texts),
-                                    query=contradiction_q[:80],
+                        # Contradiction retrieval — only for quantitative
+                        # claims (per claim-type routing). Retrieves a
+                        # SMALL extra pool (top-3) with the value stripped
+                        # so the LLM can spot conflicting numbers for the
+                        # same entity.
+                        if ctype.contradiction_query:
+                            contradiction_q = _make_contradiction_query(check.claim_text)
+                            if contradiction_q:
+                                extra = await embed_store.retrieve(
+                                    query=contradiction_q,
+                                    paper_key=paper_key,
+                                    chunks=chunks,
+                                    top_k=3,
+                                    rerank=ctype.rerank,
                                 )
+                                already = {id(c) for c, _ in top}
+                                extra_texts = [
+                                    f"[p.{c.page or '?'}] {c.text}"
+                                    for c, _ in extra
+                                    if id(c) not in already
+                                ]
+                                if extra_texts:
+                                    retrieved_chunk_texts.extend(extra_texts)
+                                    check.n_chunks = len(retrieved_chunk_texts)
+                                    dbg.trace(
+                                        "audit.contradict",
+                                        "added chunks",
+                                        n_extra=len(extra_texts),
+                                        query=contradiction_q[:80],
+                                    )
 
         # Record what tier we actually achieved (may be lower than the requested
         # ``tier`` if the paper wasn't on arXiv/SS/Crossref or had no PDF).
